@@ -14,7 +14,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 
 # ======================= НАСТРОЙКИ =======================
-BOT_TOKEN = "8970388836:AAEijLhkvhlpC3orKaFjstVFLZEoa64LfbE"
+BOT_TOKEN = "8970388836:AAFIfuQ-W3_ZW6Na-WqeITc_hpuirgBOYjQ"
 CREATOR_ID = 767598572
 
 # API-ключ Lakera Guard (твой, рабочий)
