@@ -18,10 +18,10 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from flask import Flask
 
 # ======================= НАСТРОЙКИ =======================
-BOT_TOKEN = "8970388836:AAFIfuQ-W3_ZW6Na-WqelTc_hpuirgBOYjQ"
+BOT_TOKEN = "8970388836:AAH0cFseraGhVRMRb1WB0_gh-PzbjjVhYJA"
 CREATOR_ID = 7675985792
 
-# API-ключ Lakera Guard
+# API-ключ Lakera Guard (твой, рабочий)
 LAKERA_API_KEY = "eee5eeea5aaee980fce82725ed4e88535b4b2d21e972b31f49cc722ddb87a258"
 
 # ======================= ID ТЕМ =======================
