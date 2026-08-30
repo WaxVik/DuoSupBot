@@ -1,4 +1,3 @@
 aiogram
-transformers
-torch
+aiohttp
 Flask
