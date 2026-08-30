@@ -5,6 +5,8 @@ import secrets
 import string
 from datetime import datetime, timedelta
 import aiohttp
+import threading
+import os
 
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
@@ -13,11 +15,13 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 
+from flask import Flask
+
 # ======================= НАСТРОЙКИ =======================
 BOT_TOKEN = "8970388836:AAFIfuQ-W3_ZW6Na-WqeITc_hpuirgBOYjQ"
 CREATOR_ID = 767598572
 
-# API-ключ Lakera Guard (твой, рабочий)
+# API-ключ Lakera Guard
 LAKERA_API_KEY = "eee5eeea5aaee980fce82725ed4e88535b4b2d21e972b31f49cc722ddb87a258"
 
 # ID тем в HuBBlox
@@ -526,11 +530,25 @@ async def process_violation(message: Message, text: str, msg_type: str):
             parse_mode="Markdown"
         )
 
-# ======================= ЗАПУСК =======================
+# ======================= ВЕБ-СЕРВЕР ДЛЯ RENDER (чтобы не было "no open ports") =======================
+app = Flask('')
+
+@app.route('/')
+def home():
+    return "Duosup Bot is running!"
+
+def run_web():
+    port = int(os.environ.get('PORT', 8080))
+    app.run(host='0.0.0.0', port=port)
+
+# ======================= ЗАПУСК БОТА И ВЕБ-СЕРВЕРА =======================
 async def main():
     logging.basicConfig(level=logging.INFO)
     print("Duosup запущен!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
+    # Запускаем веб-сервер в отдельном потоке, чтобы не блокировать бота
+    threading.Thread(target=run_web, daemon=True).start()
+    # Запускаем бота
     asyncio.run(main())
