@@ -1,5 +1,5 @@
 import asyncio
-import import asyncio
+import asyncio
 import logging
 import sqlite3
 import secrets
@@ -17,7 +17,6 @@ from aiogram.fsm.storage.memory import MemoryStorage
 
 from flask import Flask
 
-# Нейросеть для модерации (усиленная)
 import torch
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 
@@ -25,7 +24,7 @@ from transformers import AutoTokenizer, AutoModelForSequenceClassification
 BOT_TOKEN = "8970388836:AAFIfuQ-W3_ZW6Na-WqelTc_hpuirgBOYjQ"  # исправлено
 CREATOR_ID = 7675985792
 
-# ======================= ID ТЕМ (по твоей структуре) =======================
+# ======================= ID ТЕМ ======================
 # HubSup (админский чат)
 TOPIC_MOD_CHAT = 6          # чат модерации
 TOPIC_RULES_HUBSUP = 69     # правила для модераторов (не используется, но оставлю)
@@ -52,7 +51,7 @@ NO_INTERACTION_TOPICS = [TOPIC_ADMIN, TOPIC_APPEALS_HUBBLOX]
 TOPIC_REPORTS_HUBSUP = TOPIC_MOD_CHAT
 
 # ======================= УСИЛЕННАЯ ПРОВЕРКА ОСКОРБЛЕНИЙ =======================
-# Расширенный чёрный список
+# чёрный список
 BANNED_WORDS = [
     "хуй", "пизда", "бля", "сука", "ебать", "нахуй", "пиздец", "ебаный",
     "пидор", "лох", "редиска", "мудак", "гандон", "залупа", "долбоёб", "тупой",
