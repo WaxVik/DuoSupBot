@@ -19,7 +19,7 @@ from flask import Flask
 
 # ======================= НАСТРОЙКИ =======================
 BOT_TOKEN = "8970388836:AAFIfuQ-W3_ZW6Na-WqeITc_hpuirgBOYjQ"
-CREATOR_ID = 767598572
+CREATOR_ID = 7675985792
 
 # API-ключ Lakera Guard
 LAKERA_API_KEY = "eee5eeea5aaee980fce82725ed4e88535b4b2d21e972b31f49cc722ddb87a258"
