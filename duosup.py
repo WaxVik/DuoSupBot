@@ -1,13 +1,10 @@
-import os
-# Отключаем CUDA, чтобы снизить потребление памяти
-os.environ["PYTORCH_NO_CUDA"] = "1"
-
 import asyncio
 import logging
 import sqlite3
 import secrets
 import string
 from datetime import datetime, timedelta
+import aiohttp
 
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
@@ -16,12 +13,12 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 
-import torch
-from transformers import AutoTokenizer, AutoModelForSequenceClassification
-
-# ======================= НАСТРОЙКИ (ТВОИ ДАННЫЕ) =======================
+# ======================= НАСТРОЙКИ =======================
 BOT_TOKEN = "8970388836:AAEpPHqePTil_dLGHIck5gD2NMpjZZrWOg4"
-CREATOR_ID = 767598572  # Твой Telegram ID
+CREATOR_ID = 767598572
+
+# Твой API-ключ Lakera Guard (вставлен)
+LAKERA_API_KEY = "eee5eeea5aaee980fce82725ed4e88535b4b2d21e972b31f49cc722ddb87a258"
 
 # ID тем в HuBBlox
 TOPIC_ANNOUNCEMENTS = 16
@@ -42,33 +39,34 @@ TOPIC_MODLIST = 10
 # Темы, где модерация НЕ работает
 IGNORED_TOPICS = [TOPIC_ADMIN, TOPIC_RULES]
 
-# ======================= ИНИЦИАЛИЗАЦИЯ ЛЁГКОЙ НЕЙРОСЕТИ =======================
-print("Загрузка модели floxoris/harmony-v0 (лёгкая, ~50 МБ)...")
-model_name = "floxoris/harmony-v0"
-tokenizer = AutoTokenizer.from_pretrained(model_name)
-model = AutoModelForSequenceClassification.from_pretrained(model_name)
-model.eval()
-print("Модель загружена!")
-
-def is_insult(text: str) -> bool:
-    """
-    Проверяет, содержит ли текст оскорбление.
-    Модель floxoris/harmony-v0 бинарно классифицирует токсичность.
-    Возвращает True, если вероятность токсичности >= 0.70.
-    """
-    inputs = tokenizer(text, return_tensors="pt", truncation=True, max_length=192)
-    with torch.no_grad():
-        logits = model(**inputs).logits
-        probs = torch.softmax(logits, dim=-1)[0]
-        # Индексы: 0 - non-toxic, 1 - toxic
-        toxic_prob = float(probs[1])
-        return toxic_prob >= 0.70
+# ======================= ПРОВЕРКА ТОКСИЧНОСТИ ЧЕРЕЗ LAKERA GUARD =======================
+async def is_insult(text: str) -> bool:
+    url = "https://api.lakera.ai/v1/content_moderation"
+    headers = {
+        "Authorization": f"Bearer {LAKERA_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "input": text,
+        "language": "ru"
+    }
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.post(url, headers=headers, json=payload, timeout=5) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return data.get("is_toxic", False)
+                else:
+                    print(f"Lakera API error: {resp.status}")
+                    return False
+        except Exception as e:
+            print(f"Lakera API exception: {e}")
+            return False
 
 # ======================= БАЗА ДАННЫХ =======================
 conn = sqlite3.connect("duosup.db", check_same_thread=False)
 cursor = conn.cursor()
 
-# Таблицы
 cursor.execute('''
 CREATE TABLE IF NOT EXISTS config (
     key TEXT PRIMARY KEY,
@@ -131,7 +129,6 @@ CREATE TABLE IF NOT EXISTS violations (
 )
 ''')
 
-# Шаблоны по умолчанию
 defaults = {
     'warn_template': '{user} получает варн ({warn}/4)\n<1 варн - предупреждение\n2 варн - мут (30 мин)\n3 варн - мут (24 ч)\n4 варн - бан>',
     'ban_template': '{user} получает бан ({warn}/4)\nПричина: нарушение правил (получено 4 варна)',
@@ -231,7 +228,6 @@ def get_moderator_ids():
 def is_creator_or_moderator(user_id):
     return user_id == CREATOR_ID or user_id in get_moderator_ids()
 
-# ======================= FSM СОСТОЯНИЯ =======================
 class AppealStates(StatesGroup):
     waiting_for_text = State()
 
@@ -251,7 +247,6 @@ async def start_cmd(message: Message):
         "• В HubSup: /link_hubsup <код>"
     )
 
-# --- Связка чатов ---
 @dp.message(Command("link_hublox"))
 async def link_hublox(message: Message):
     if message.chat.type not in ("group", "supergroup"):
@@ -292,7 +287,6 @@ async def link_hubsup(message: Message):
             text="🔗 **HubSup успешно связан!**\nТеперь бот работает в обоих чатах."
         )
 
-# --- Команды редактирования (только создатель) ---
 @dp.message(Command("redactwarn"))
 async def redact_warn(message: Message):
     if message.from_user.id != CREATOR_ID:
@@ -361,7 +355,6 @@ async def redact_rule(message: Message):
         )
     await message.answer(f"✅ Правила обновлены до версии {new_version}!")
 
-# --- Управление модераторами ---
 @dp.message(Command("addmod"))
 async def add_moderator(message: Message):
     if message.from_user.id != CREATOR_ID:
@@ -395,7 +388,6 @@ async def remove_moderator(message: Message):
     conn.commit()
     await message.answer(f"✅ @{username} удалён из модераторов.")
 
-# --- Аппеляции (FSM) ---
 @dp.message(Command("appeal"))
 async def appeal_start(message: Message, state: FSMContext):
     await message.answer("📝 Напишите текст вашей аппеляции. Опишите ситуацию подробно.")
@@ -428,7 +420,6 @@ async def appeal_text(message: Message, state: FSMContext):
     await message.answer(f"✅ Ваша аппеляция {number} принята. Администрация рассмотрит её в ближайшее время.")
     await state.clear()
 
-# --- Статистика ---
 @dp.message(Command("stats"))
 async def stats_cmd(message: Message):
     if not is_creator_or_moderator(message.from_user.id):
@@ -449,33 +440,27 @@ async def stats_cmd(message: Message):
         f"Всего: {total_count}"
     )
 
-# ======================= ОБРАБОТЧИК ВСЕХ СООБЩЕНИЙ (МОДЕРАЦИЯ) =======================
+# ======================= ОБРАБОТЧИК ВСЕХ СООБЩЕНИЙ =======================
 @dp.message()
 async def handle_all_messages(message: Message):
-    # Проверяем, что сообщение из связанного HuBBlox
     hublox_id = get_config("hublox_id")
     if not hublox_id or str(message.chat.id) != hublox_id:
-        return  # игнорируем другие чаты
+        return
 
-    # Игнорируем темы, где модерация не нужна
     if message.message_thread_id in IGNORED_TOPICS:
         return
 
-    # Проверка бана
     if is_banned(message.from_user.id):
         await message.delete()
         await message.answer("Вы забанены и не можете писать.")
         return
 
-    # Сброс варнов через неделю
     reset_warns_if_needed(message.from_user.id)
 
-    # Проверяем только текстовые сообщения
     if not message.text:
         return
 
-    # Проверка на оскорбление
-    if is_insult(message.text):
+    if await is_insult(message.text):
         await process_violation(message, message.text, "оскорбление")
 
 # ======================= ФУНКЦИЯ ОБРАБОТКИ НАРУШЕНИЙ =======================
@@ -484,7 +469,6 @@ async def process_violation(message: Message, text: str, msg_type: str):
     warn_count = add_warn(user.id)
     user_mention = f"@{user.username}" if user.username else user.first_name
 
-    # Определяем наказание
     action = ""
     if warn_count == 1:
         action = "предупреждение"
@@ -512,7 +496,6 @@ async def process_violation(message: Message, text: str, msg_type: str):
         cursor.execute("UPDATE users SET banned=1, ban_until=NULL WHERE user_id=?", (user.id,))
         conn.commit()
 
-    # Отправляем уведомление в чат (используем шаблон)
     if warn_count < 4:
         template = get_template('warn_template')
         msg_text = template.format(user=user_mention, warn=warn_count)
@@ -521,14 +504,12 @@ async def process_violation(message: Message, text: str, msg_type: str):
         msg_text = template.format(user=user_mention, warn=warn_count)
     await message.reply(msg_text)
 
-    # Логируем нарушение
     cursor.execute(
         "INSERT INTO violations (user_id, username, text, action, created_at) VALUES (?, ?, ?, ?, ?)",
         (user.id, user.username, text, action, int(datetime.now().timestamp()))
     )
     conn.commit()
 
-    # Отправляем отчёт в HubSup (в тему модерации)
     hubsup_id = get_config("hubsup_id")
     if hubsup_id:
         report = (
