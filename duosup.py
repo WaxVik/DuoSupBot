@@ -9,7 +9,7 @@ import os
 import aiohttp
 
 from aiogram import Bot, Dispatcher, types, F
-from aiogram.filters import Command, ContentTypeFilter
+from aiogram.filters import Command
 from aiogram.types import Message, ChatPermissions, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, ContentType
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -388,24 +388,6 @@ async def send_help_to_chat(chat_id):
     )
     await bot.send_message(chat_id=chat_id, text=help_text, parse_mode="Markdown")
 
-# Обработчик текстовых сообщений (включая "Бот")
-@dp.message(F.text)
-async def handle_text(message: Message):
-    # Обработка "Бот"
-    if message.text and message.text.lower() == "бот":
-        await message.reply("На месте ✅")
-        return
-
-    # Остальную логику (модерацию) обрабатываем в основном хендлере
-    # Но если мы уже здесь, нужно вызвать основной обработчик или реализовать логику
-    # Проще всего оставить основной хендлер ниже, но чтобы избежать конфликтов,
-    # мы можем просто вернуться, если сообщение не "Бот", и дать обработать дальше.
-    # Но в aiogram 3.x обработчики выполняются по порядку, и если у нас есть
-    # несколько хендлеров, то нужно быть аккуратным. Лучше совместить всё в одном
-    # или использовать F.filter.
-    # Я перепишу логику так: все сообщения идут в общий хендлер, где уже есть
-    # проверка на "Бот". Поэтому этот хендлер можно убрать, но оставим пока как есть.
-
 @dp.message(Command("rules"))
 async def rules_cmd(message: Message):
     rules = get_current_rules()
@@ -711,8 +693,8 @@ async def appeal_text(message: Message, state: FSMContext):
     await message.answer(f"✅ Ваша аппеляция {number} принята. Администрация рассмотрит её.")
     await state.clear()
 
-# ======================= ОБРАБОТЧИК НОВЫХ УЧАСТНИКОВ (исправленный синтаксис) =======================
-@dp.message(ContentTypeFilter(ContentType.NEW_CHAT_MEMBERS))
+# ======================= ОБРАБОТЧИК НОВЫХ УЧАСТНИКОВ =======================
+@dp.message(F.content_type.in_({ContentType.NEW_CHAT_MEMBERS}))
 async def welcome_new_member(message: Message):
     if str(message.chat.id) != get_config("hublox_id"):
         return
@@ -728,10 +710,10 @@ async def welcome_new_member(message: Message):
             text=msg_text
         )
 
-# ======================= ОСНОВНОЙ ОБРАБОТЧИК ТЕКСТОВЫХ СООБЩЕНИЙ (модерация) =======================
+# ======================= ОСНОВНОЙ ОБРАБОТЧИК ТЕКСТОВЫХ СООБЩЕНИЙ =======================
 @dp.message(F.text)
 async def handle_all_messages(message: Message):
-    # Проверяем "Бот" - это дублируется, но оставим для надёжности
+    # Обработка "Бот"
     if message.text and message.text.lower() == "бот":
         await message.reply("На месте ✅")
         return
@@ -757,7 +739,6 @@ async def handle_all_messages(message: Message):
     if not message.text:
         return
 
-    # Проверка на оскорбление через Lakera
     if await is_insult(message.text):
         is_reply = message.reply_to_message is not None
         await process_violation(message, message.text, "оскорбление", is_reply)
