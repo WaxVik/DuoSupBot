@@ -793,24 +793,22 @@ async def process_violation(message: Message, text: str, msg_type: str, is_reply
             parse_mode="Markdown"
         )
 
-# ======================= ВЕБ-СЕРВЕР ДЛЯ RENDER =======================
-app = Flask('')
-
-@app.route('/')
-def home():
-    return "Duosup Bot is running!"
-
-def run_web():
-    port = int(os.environ.get('PORT', 8080))
-    app.run(host='0.0.0.0', port=port)
-
 # ======================= ЗАПУСК =======================
 async def main():
     logging.basicConfig(level=logging.INFO)
-    asyncio.create_task(check_expired_warns())
-    print("Duosup запущен!")
-    await dp.start_polling(bot)
+    try:
+        asyncio.create_task(check_expired_warns())
+        print("Duosup запущен!")
+        await dp.start_polling(bot)
+    except Exception as e:
+        print(f"Ошибка: {e}")
+        logging.error(f"Ошибка: {e}", exc_info=True)
+        raise
 
 if __name__ == "__main__":
-    threading.Thread(target=run_web, daemon=True).start()
-    asyncio.run(main())
+    try:
+        threading.Thread(target=run_web, daemon=True).start()
+        asyncio.run(main())
+    except Exception as e:
+        print(f"Глобальная ошибка: {e}")
+        raise
