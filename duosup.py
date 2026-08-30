@@ -14,10 +14,10 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 
 # ======================= НАСТРОЙКИ =======================
-BOT_TOKEN = "8970388836:AAEijLhkvhlpC3orKaFjstV FLZEoa64LfbE"
+BOT_TOKEN = "8970388836:AAEijLhkvhlpC3orKaFjstVFLZEoa64LfbE"
 CREATOR_ID = 767598572
 
-# Твой API-ключ Lakera Guard (вставлен)
+# API-ключ Lakera Guard (твой, рабочий)
 LAKERA_API_KEY = "eee5eeea5aaee980fce82725ed4e88535b4b2d21e972b31f49cc722ddb87a258"
 
 # ID тем в HuBBlox
