@@ -1,3 +1,7 @@
+import os
+# Отключаем CUDA, чтобы снизить потребление памяти
+os.environ["PYTORCH_NO_CUDA"] = "1"
+
 import asyncio
 import logging
 import sqlite3
@@ -11,10 +15,6 @@ from aiogram.types import Message, ChatPermissions
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.client.session.aiohttp import AiohttpSession
-
-# Импорт для прокси (если понадобится)
-# from aiohttp_socks import ProxyConnector
 
 import torch
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
@@ -42,16 +42,9 @@ TOPIC_MODLIST = 10
 # Темы, где модерация НЕ работает
 IGNORED_TOPICS = [TOPIC_ADMIN, TOPIC_RULES]
 
-# ======================= НАСТРОЙКА ПРОКСИ (опционально) =======================
-# Если нужен прокси, раскомментируй строку ниже и укажи свой прокси.
-# Примеры:
-#   SOCKS5: "socks5://127.0.0.1:9050"
-#   HTTP:   "http://user:pass@ip:port"
-PROXY_URL = None  # или, например, "socks5://127.0.0.1:9050"
-
-# ======================= ИНИЦИАЛИЗАЦИЯ НЕЙРОСЕТИ =======================
-print("Загрузка модели cointegrated/rubert-tiny-toxicity...")
-model_name = "cointegrated/rubert-tiny-toxicity"
+# ======================= ИНИЦИАЛИЗАЦИЯ ЛЁГКОЙ НЕЙРОСЕТИ =======================
+print("Загрузка модели floxoris/harmony-v0 (лёгкая, ~50 МБ)...")
+model_name = "floxoris/harmony-v0"
 tokenizer = AutoTokenizer.from_pretrained(model_name)
 model = AutoModelForSequenceClassification.from_pretrained(model_name)
 model.eval()
@@ -59,16 +52,17 @@ print("Модель загружена!")
 
 def is_insult(text: str) -> bool:
     """
-    Проверяет, содержит ли текст оскорбление (insult).
-    Возвращает True, если вероятность insult выше порога (0.7).
+    Проверяет, содержит ли текст оскорбление.
+    Модель floxoris/harmony-v0 бинарно классифицирует токсичность.
+    Возвращает True, если вероятность токсичности >= 0.70.
     """
     inputs = tokenizer(text, return_tensors="pt", truncation=True, max_length=192)
     with torch.no_grad():
         logits = model(**inputs).logits
         probs = torch.softmax(logits, dim=-1)[0]
-        # Индексы: 0 - toxic, 1 - insult, 2 - profanity, 3 - threat
-        insult_prob = float(probs[1])
-        return insult_prob >= 0.70
+        # Индексы: 0 - non-toxic, 1 - toxic
+        toxic_prob = float(probs[1])
+        return toxic_prob >= 0.70
 
 # ======================= БАЗА ДАННЫХ =======================
 conn = sqlite3.connect("duosup.db", check_same_thread=False)
@@ -243,20 +237,7 @@ class AppealStates(StatesGroup):
 
 # ======================= ИНИЦИАЛИЗАЦИЯ БОТА =======================
 storage = MemoryStorage()
-
-# Создаём сессию с прокси, если он указан
-if PROXY_URL:
-    # Если используется прокси, нужно раскомментировать импорт ProxyConnector вверху
-    # и установить библиотеку aiohttp-socks
-    # proxy_connector = ProxyConnector.from_url(PROXY_URL)
-    # session = AiohttpSession(connector=proxy_connector)
-    # bot = Bot(token=BOT_TOKEN, session=session)
-    # Пока закомментировано, чтобы не требовать лишних зависимостей
-    print("⚠️ Прокси включён, но для работы нужно установить aiohttp-socks и раскомментировать код.")
-    bot = Bot(token=BOT_TOKEN)  # временно без прокси
-else:
-    bot = Bot(token=BOT_TOKEN)
-
+bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=storage)
 
 # ======================= КОМАНДЫ =======================
@@ -493,7 +474,7 @@ async def handle_all_messages(message: Message):
     if not message.text:
         return
 
-    # Проверка на оскорбление (insult), а не просто мат
+    # Проверка на оскорбление
     if is_insult(message.text):
         await process_violation(message, message.text, "оскорбление")
 
