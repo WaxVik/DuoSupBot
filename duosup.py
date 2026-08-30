@@ -1,5 +1,4 @@
 import asyncio
-import asyncio
 import logging
 import sqlite3
 import secrets
@@ -7,6 +6,7 @@ import string
 from datetime import datetime, timedelta
 import threading
 import os
+import aiohttp
 
 from aiogram import Bot, Dispatcher, types
 from aiogram.filters import Command
@@ -17,17 +17,17 @@ from aiogram.fsm.storage.memory import MemoryStorage
 
 from flask import Flask
 
-import torch
-from transformers import AutoTokenizer, AutoModelForSequenceClassification
-
 # ======================= НАСТРОЙКИ =======================
-BOT_TOKEN = "8970388836:AAFIfuQ-W3_ZW6Na-WqelTc_hpuirgBOYjQ"  # исправлено
+BOT_TOKEN = "8970388836:AAFIfuQ-W3_ZW6Na-WqelTc_hpuirgBOYjQ"
 CREATOR_ID = 7675985792
 
-# ======================= ID ТЕМ ======================
+# API-ключ Lakera Guard (твой, уже есть)
+LAKERA_API_KEY = "eee5eeea5aaee980fce82725ed4e88535b4b2d21e972b31f49cc722ddb87a258"
+
+# ======================= ID ТЕМ (по твоей структуре) =======================
 # HubSup (админский чат)
 TOPIC_MOD_CHAT = 6          # чат модерации
-TOPIC_RULES_HUBSUP = 69     # правила для модераторов (не используется, но оставлю)
+TOPIC_RULES_HUBSUP = 69     # правила для модераторов (не используется)
 TOPIC_APPEALS = 9           # аппеляции
 TOPIC_MODLIST = 10          # состав администрации
 TOPIC_REDACT = 8            # редакт
@@ -47,198 +47,15 @@ IGNORED_TOPICS = [TOPIC_ADMIN, TOPIC_RULES, TOPIC_ANNOUNCEMENTS, TOPIC_WELCOME, 
 # Темы, где бот НЕ должен ничего делать (даже команды)
 NO_INTERACTION_TOPICS = [TOPIC_ADMIN, TOPIC_APPEALS_HUBBLOX]
 
-# Репорты отправляем в основной чат модерации (можно было бы создать отдельную тему, но пока так)
+# Репорты отправляем в основной чат модерации
 TOPIC_REPORTS_HUBSUP = TOPIC_MOD_CHAT
-
-# ======================= УСИЛЕННАЯ ПРОВЕРКА ОСКОРБЛЕНИЙ =======================
-# чёрный список
-BANNED_WORDS = [
-    "хуй", "пизда", "бля", "сука", "ебать", "нахуй", "пиздец", "ебаный",
-    "пидор", "лох", "редиска", "мудак", "гандон", "залупа", "долбоёб", "тупой",
-    "уебок", "шлюха", "тварь", "гнида", "козёл", "овца", "свинья", "чмо",
-    "дебил", "идиот", "кретин", "петух", "шалава", "проститутка", "сучка"
-]
-
-print("Загрузка модели cointegrated/rubert-tiny-toxicity...")
-model_name = "cointegrated/rubert-tiny-toxicity"
-tokenizer = AutoTokenizer.from_pretrained(model_name)
-model = AutoModelForSequenceClassification.from_pretrained(model_name)
-model.eval()
-print("Модель загружена!")
-
-def is_insult(text: str, is_reply: bool = False) -> bool:
-    # 1. Проверка по чёрному списку (быстро)
-    text_lower = text.lower()
-    for word in BANNED_WORDS:
-        if word in text_lower:
-            return True
-
-    # 2. Нейросеть – порог снижен для большей чувствительности
-    inputs = tokenizer(text, return_tensors="pt", truncation=True, max_length=192)
-    with torch.no_grad():
-        logits = model(**inputs).logits
-        probs = torch.softmax(logits, dim=-1)[0]
-        insult_prob = float(probs[1])  # 1 - insult
-        # Для ответов (reply) делаем порог ещё ниже – 0.5, для обычных – 0.6
-        threshold = 0.5 if is_reply else 0.6
-        return insult_prob >= threshold
-
-# ======================= БАЗА ДАННЫХ =======================
-conn = sqlite3.connect("duosup.db", check_same_thread=False)
-cursor = conn.cursor()
-
-# ... (все CREATE TABLE и defaults точно такие же, как в предыдущей версии, я не буду повторять для краткости, но они есть в коде ниже)
-
-# ======================= ИНИЦИАЛИЗАЦИЯ БОТА =======================
-storage = MemoryStorage()
-bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher(storage=storage)
-
-# ======================= ФОНОВАЯ ЗАДАЧА (снятие варнов) =======================
-async def check_expired_warns():
-    while True:
-        await asyncio.sleep(3600)
-        now_ts = int(datetime.now().timestamp())
-        cursor.execute(
-            "SELECT user_id FROM warn_logs WHERE is_active=1 AND created_at <= ?",
-            (now_ts - 7 * 24 * 3600,)
-        )
-        expired = cursor.fetchall()
-        for row in expired:
-            user_id = row[0]
-            remove_all_warns(user_id)
-            hublox_id = get_config("hublox_id")
-            if hublox_id:
-                try:
-                    user = await bot.get_chat(user_id)
-                    mention = f"@{user.username}" if user.username else user.full_name
-                    await bot.send_message(
-                        chat_id=int(hublox_id),
-                        message_thread_id=TOPIC_CHAT,  # можно отправить в общий чат
-                        text=f"🔄 Все нарушения с пользователя {mention} были сняты.\nПожалуйста, следите за языком."
-                    )
-                except:
-                    pass
-
-# ======================= КОМАНДЫ =======================
-# (все команды, включая /start, /link_hublox, /link_hubsup, /rules, /report, /warn, /ban, /unban, /unwarn, /redact, /addmod, /removemod, /stats, /appeal – остаются без изменений, кроме ID тем)
-
-# Я приведу только изменённые части: обработчики с использованием новых ID и усиленной модерации.
-
-# ======================= ОБРАБОТЧИК НОВЫХ УЧАСТНИКОВ (приветствие) =======================
-@dp.message(content_types=ContentType.NEW_CHAT_MEMBERS)
-async def welcome_new_member(message: Message):
-    if str(message.chat.id) != get_config("hublox_id"):
-        return
-    for member in message.new_chat_members:
-        if member.id == bot.id:
-            continue  # не приветствуем самого бота
-        user_mention = f"@{member.username}" if member.username else member.full_name
-        template = get_template('welcome_template')
-        msg_text = template.format(user=user_mention)
-        await bot.send_message(
-            chat_id=message.chat.id,
-            message_thread_id=TOPIC_WELCOME,
-            text=msg_text
-        )
-
-# ======================= ОБРАБОТЧИК ВСЕХ СООБЩЕНИЙ (МОДЕРАЦИЯ) =======================
-@dp.message()
-async def handle_all_messages(message: Message):
-    # Игнорируем сообщения из запрещённых тем
-    if message.message_thread_id in NO_INTERACTION_TOPICS:
-        return
-
-    hublox_id = get_config("hublox_id")
-    if not hublox_id or str(message.chat.id) != hublox_id:
-        return
-
-    if message.message_thread_id in IGNORED_TOPICS:
-        return
-
-    if is_banned(message.from_user.id):
-        await message.delete()
-        await message.answer("Вы забанены и не можете писать.")
-        return
-
-    reset_warns_if_needed(message.from_user.id)
-
-    if not message.text:
-        return
-
-    is_reply = message.reply_to_message is not None
-    if is_insult(message.text, is_reply):
-        await process_violation(message, message.text, "оскорбление", is_reply)
-
-# ======================= ФУНКЦИЯ ОБРАБОТКИ НАРУШЕНИЙ =======================
-# (остаётся без изменений, но использует новые пороги)
-
-# ======================= ВЕБ-СЕРВЕР ДЛЯ RENDER =======================
-app = Flask('')
-
-@app.route('/')
-def home():
-    return "Duosup Bot is running!"
-
-def run_web():
-    port = int(os.environ.get('PORT', 8080))
-    app.run(host='0.0.0.0', port=port)
-
-# ======================= ЗАПУСК =======================
-async def main():
-    logging.basicConfig(level=logging.INFO)
-    asyncio.create_task(check_expired_warns())
-    print("Duosup запущен!")
-    await dp.start_polling(bot)
-
-if __name__ == "__main__":
-    threading.Thread(target=run_web, daemon=True).start()
-    asyncio.run(main())
-import sqlite3
-import secrets
-import string
-from datetime import datetime, timedelta
-import aiohttp
-import threading
-import os
-
-from aiogram import Bot, Dispatcher, types
-from aiogram.filters import Command
-from aiogram.types import Message, ChatPermissions
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
-from aiogram.fsm.storage.memory import MemoryStorage
-
-from flask import Flask
-
-# ======================= НАСТРОЙКИ =======================
-BOT_TOKEN = "8970388836:AAFIfuQ-W3_ZW6Na-WqeITc_hpuirgBOYjQ"
-CREATOR_ID = 7675985792
-
-# API-ключ Lakera Guard
-LAKERA_API_KEY = "eee5eeea5aaee980fce82725ed4e88535b4b2d21e972b31f49cc722ddb87a258"
-
-# ID тем в HuBBlox
-TOPIC_ANNOUNCEMENTS = 16
-TOPIC_RULES = 6
-TOPIC_ADMIN = 27
-TOPIC_REPORTS = 20
-TOPIC_RAIDS = 17
-TOPIC_WELCOME = 1
-TOPIC_CHAT = 7
-TOPIC_TRADES = 8
-
-# ID тем в HubSup
-TOPIC_MOD_CHAT = 6
-TOPIC_REDACT = 8
-TOPIC_APPEALS = 9
-TOPIC_MODLIST = 10
-
-# Темы, где модерация НЕ работает
-IGNORED_TOPICS = [TOPIC_ADMIN, TOPIC_RULES]
 
 # ======================= ПРОВЕРКА ТОКСИЧНОСТИ ЧЕРЕЗ LAKERA GUARD =======================
 async def is_insult(text: str) -> bool:
+    """
+    Проверяет текст через Lakera Guard API.
+    Возвращает True, если текст содержит оскорбление/токсичность.
+    """
     url = "https://api.lakera.ai/v1/content_moderation"
     headers = {
         "Authorization": f"Bearer {LAKERA_API_KEY}",
@@ -253,6 +70,7 @@ async def is_insult(text: str) -> bool:
             async with session.post(url, headers=headers, json=payload, timeout=5) as resp:
                 if resp.status == 200:
                     data = await resp.json()
+                    # Lakera возвращает is_toxic (bool) и score (float)
                     return data.get("is_toxic", False)
                 else:
                     print(f"Lakera API error: {resp.status}")
@@ -279,6 +97,25 @@ CREATE TABLE IF NOT EXISTS users (
     banned BOOLEAN DEFAULT 0,
     ban_until INTEGER,
     last_warn_time INTEGER
+)
+''')
+
+cursor.execute('''
+CREATE TABLE IF NOT EXISTS global_counter (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    last_number INTEGER DEFAULT 0
+)
+''')
+cursor.execute("INSERT OR IGNORE INTO global_counter (id, last_number) VALUES (1, 0)")
+
+cursor.execute('''
+CREATE TABLE IF NOT EXISTS warn_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    warn_number TEXT,
+    reason TEXT,
+    created_at INTEGER,
+    is_active BOOLEAN DEFAULT 1
 )
 ''')
 
@@ -323,16 +160,21 @@ CREATE TABLE IF NOT EXISTS violations (
     username TEXT,
     text TEXT,
     action TEXT,
+    is_reply BOOLEAN,
     created_at INTEGER
 )
 ''')
 
+# Шаблоны по умолчанию
 defaults = {
-    'warn_template': '{user} получает варн ({warn}/4)\n<1 варн - предупреждение\n2 варн - мут (30 мин)\n3 варн - мут (24 ч)\n4 варн - бан>',
-    'ban_template': '{user} получает бан ({warn}/4)\nПричина: нарушение правил (получено 4 варна)',
-    'welcome_template': '{user}, добро пожаловать в HuBBlox!\nПожалуйста, ознакомьтесь с правилами сообщества.',
-    'report_template': '📋 Шаблон для аппеляции:\nНапишите текст вашей аппеляции.\nСсылка для связи: @admin',
-    'rules_version': '1.0'
+    'warn_template': '{user} получает варн {warn}/4 {warn_id}\n<текст сообщения который я введу>',
+    'ban_template': '{user} получает Бан\n<текст который я введу>',
+    'unban_template': 'Пользователь {user} разбанен\n<текст который я введу>',
+    'unwarn_template': 'С пользователя {user} были сняты все варны 0/4\n<текст который я введу>',
+    'welcome_template': '{user} добро пожаловать в HuBBlox\n<Ознакомтесь правилами группы пожалуйста>',
+    'appeal_template': 'Пожалуйста напишите номер вашего варна/бана. Видео, аудио и фото доказательства не принимаются. По вопросам писать <текст который я задам>',
+    'rules_version': '1.0',
+    'admins_list': '@WaxVik0\n@ISHELJ'  # по умолчанию
 }
 for key, val in defaults.items():
     cursor.execute("INSERT OR IGNORE INTO templates (key, value) VALUES (?, ?)", (key, val))
@@ -366,19 +208,37 @@ def generate_link_code():
     parts = [''.join(secrets.choice(alphabet) for _ in range(5)) for _ in range(5)]
     return '-'.join(parts)
 
+def get_next_warn_number():
+    cursor.execute("UPDATE global_counter SET last_number = last_number + 1 WHERE id = 1 RETURNING last_number")
+    new_num = cursor.fetchone()[0]
+    conn.commit()
+    return f"#{new_num:05d}"
+
 def get_user_warns(user_id):
     cursor.execute("SELECT warns FROM users WHERE user_id=?", (user_id,))
     row = cursor.fetchone()
     return row[0] if row else 0
 
-def add_warn(user_id):
+def add_warn(user_id, reason=""):
     current = get_user_warns(user_id)
+    warn_id = get_next_warn_number()
     if current == 0:
         cursor.execute("INSERT INTO users (user_id, warns) VALUES (?, 1)", (user_id,))
     else:
         cursor.execute("UPDATE users SET warns = warns + 1 WHERE user_id=?", (user_id,))
     conn.commit()
-    return current + 1
+    new_warns = current + 1
+    cursor.execute(
+        "INSERT INTO warn_logs (user_id, warn_number, reason, created_at) VALUES (?, ?, ?, ?)",
+        (user_id, warn_id, reason, int(datetime.now().timestamp()))
+    )
+    conn.commit()
+    return new_warns, warn_id
+
+def remove_all_warns(user_id):
+    cursor.execute("UPDATE users SET warns=0, last_warn_time=NULL WHERE user_id=?", (user_id,))
+    cursor.execute("UPDATE warn_logs SET is_active=0 WHERE user_id=? AND is_active=1", (user_id,))
+    conn.commit()
 
 def reset_warns_if_needed(user_id):
     cursor.execute("SELECT last_warn_time FROM users WHERE user_id=?", (user_id,))
@@ -386,8 +246,7 @@ def reset_warns_if_needed(user_id):
     now_ts = datetime.now().timestamp()
     if row and row[0]:
         if now_ts - row[0] > 7 * 24 * 3600:
-            cursor.execute("UPDATE users SET warns=0, last_warn_time=? WHERE user_id=?", (now_ts, user_id))
-            conn.commit()
+            remove_all_warns(user_id)
             return True
     return False
 
@@ -429,10 +288,39 @@ def is_creator_or_moderator(user_id):
 class AppealStates(StatesGroup):
     waiting_for_text = State()
 
+class RedactStates(StatesGroup):
+    waiting_for_input = State()
+
 # ======================= ИНИЦИАЛИЗАЦИЯ БОТА =======================
 storage = MemoryStorage()
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=storage)
+
+# ======================= ФОНОВАЯ ЗАДАЧА (снятие варнов) =======================
+async def check_expired_warns():
+    while True:
+        await asyncio.sleep(3600)  # каждые 60 минут
+        now_ts = int(datetime.now().timestamp())
+        cursor.execute(
+            "SELECT user_id FROM warn_logs WHERE is_active=1 AND created_at <= ?",
+            (now_ts - 7 * 24 * 3600,)
+        )
+        expired = cursor.fetchall()
+        for row in expired:
+            user_id = row[0]
+            remove_all_warns(user_id)
+            hublox_id = get_config("hublox_id")
+            if hublox_id:
+                try:
+                    user = await bot.get_chat(user_id)
+                    mention = f"@{user.username}" if user.username else user.full_name
+                    await bot.send_message(
+                        chat_id=int(hublox_id),
+                        message_thread_id=TOPIC_CHAT,
+                        text=f"🔄 Все нарушения с пользователя {mention} были сняты.\nПожалуйста, следите за языком."
+                    )
+                except:
+                    pass
 
 # ======================= КОМАНДЫ =======================
 @dp.message(Command("start"))
@@ -448,7 +336,7 @@ async def start_cmd(message: Message):
 @dp.message(Command("link_hublox"))
 async def link_hublox(message: Message):
     if message.chat.type not in ("group", "supergroup"):
-        await message.answer("Эта команда работает только в группе HuBBlox!")
+        await message.answer("Эта команда работает только в группе!")
         return
     code = generate_link_code()
     set_config("link_code", code)
@@ -462,7 +350,7 @@ async def link_hublox(message: Message):
 @dp.message(Command("link_hubsup"))
 async def link_hubsup(message: Message):
     if message.chat.type not in ("group", "supergroup"):
-        await message.answer("Эта команда работает только в группе HubSup!")
+        await message.answer("Эта команда работает только в группе!")
         return
     args = message.text.split()
     if len(args) < 2:
@@ -474,7 +362,7 @@ async def link_hubsup(message: Message):
         await message.answer("⚠️ Сначала выполните /link_hublox в HuBBlox!")
         return
     if code != saved_code:
-        await message.answer("❌ Неверный код! Проверьте и попробуйте снова.")
+        await message.answer("❌ Неверный код!")
         return
     set_config("hubsup_id", str(message.chat.id))
     await message.answer("✅ HubSup успешно связан с HuBBlox!")
@@ -484,74 +372,270 @@ async def link_hubsup(message: Message):
             chat_id=int(hublox_id),
             text="🔗 **HubSup успешно связан!**\nТеперь бот работает в обоих чатах."
         )
+        await send_help_to_chat(int(hublox_id))
 
-@dp.message(Command("redactwarn"))
-async def redact_warn(message: Message):
-    if message.from_user.id != CREATOR_ID:
-        return await message.answer("⛔ Доступно только создателю.")
-    new_text = message.text.replace("/redactwarn", "").strip()
-    if not new_text:
-        await message.answer("Напишите новый шаблон для варнов. Используйте {user}, {warn}")
-        return
-    set_template('warn_template', new_text)
-    await message.answer("✅ Шаблон варнов обновлён!")
+async def send_help_to_chat(chat_id):
+    help_text = (
+        "🤖 **Duosup Bot — список команд**\n\n"
+        "**Для всех:**\n"
+        "/rules — показать правила\n"
+        "/report — ответьте на сообщение нарушителя и напишите /report <текст>\n"
+        "Напишите \"Бот\" — бот ответит \"На месте ✅\"\n\n"
+        "**Для модераторов и создателя:**\n"
+        "/warn — ответьте на сообщение и напишите /warn <причина>\n"
+        "/ban — ответьте на сообщение и напишите /ban <причина>\n"
+        "/unban — ответьте на сообщение и напишите /unban\n"
+        "/unwarn — ответьте на сообщение и напишите /unwarn\n"
+        "/stats — статистика нарушений\n\n"
+        "**Для создателя:**\n"
+        "/redact — настройка всех сообщений\n"
+        "/addmod @username [роль] — добавить модератора\n"
+        "/removemod @username — удалить модератора"
+    )
+    await bot.send_message(chat_id=chat_id, text=help_text, parse_mode="Markdown")
 
-@dp.message(Command("redactban"))
-async def redact_ban(message: Message):
-    if message.from_user.id != CREATOR_ID:
-        return await message.answer("⛔ Доступно только создателю.")
-    new_text = message.text.replace("/redactban", "").strip()
-    if not new_text:
-        await message.answer("Напишите новый шаблон для банов. Используйте {user}, {warn}")
+@dp.message()
+async def bot_mention(message: Message):
+    if message.text and message.text.lower() == "бот":
+        await message.reply("На месте ✅")
         return
-    set_template('ban_template', new_text)
-    await message.answer("✅ Шаблон банов обновлён!")
 
-@dp.message(Command("redactwelcome"))
-async def redact_welcome(message: Message):
-    if message.from_user.id != CREATOR_ID:
-        return await message.answer("⛔ Доступно только создателю.")
-    new_text = message.text.replace("/redactwelcome", "").strip()
-    if not new_text:
-        await message.answer("Напишите новый текст приветствия. Используйте {user}")
+@dp.message(Command("rules"))
+async def rules_cmd(message: Message):
+    rules = get_current_rules()
+    if not rules:
+        await message.answer("📜 Правила ещё не установлены.")
         return
-    set_template('welcome_template', new_text)
-    await message.answer("✅ Приветствие обновлено!")
+    await message.answer(f"📜 **Правила чата (v{rules[0]})**\n\n{rules[1]}", parse_mode="Markdown")
 
-@dp.message(Command("redactreport"))
-async def redact_report(message: Message):
-    if message.from_user.id != CREATOR_ID:
-        return await message.answer("⛔ Доступно только создателю.")
-    new_text = message.text.replace("/redactreport", "").strip()
-    if not new_text:
-        await message.answer("Напишите новый текст для репортов.")
+@dp.message(Command("report"))
+async def report_cmd(message: Message):
+    if not message.reply_to_message:
+        await message.answer("⚠️ Используй команду как ответ на сообщение нарушителя!")
         return
-    set_template('report_template', new_text)
-    await message.answer("✅ Шаблон репортов обновлён!")
-
-@dp.message(Command("redactrule"))
-async def redact_rule(message: Message):
-    if message.from_user.id != CREATOR_ID:
-        return await message.answer("⛔ Доступно только создателю.")
-    new_text = message.text.replace("/redactrule", "").strip()
-    if not new_text:
-        await message.answer("Напишите новые правила.")
-        return
-    current_version = get_template('rules_version')
-    major, minor = map(int, current_version.split('.'))
-    minor += 1
-    new_version = f"{major}.{minor}"
-    set_template('rules_version', new_version)
-    update_rules(new_version, new_text)
-    hublox_id = get_config("hublox_id")
-    if hublox_id:
+    reporter = message.from_user
+    violator = message.reply_to_message.from_user
+    reason = message.text.replace("/report", "").strip() or "Без причины"
+    hubsup_id = get_config("hubsup_id")
+    if hubsup_id:
+        report_text = (
+            f"📩 **Новый репорт**\n"
+            f"От: @{reporter.username or reporter.first_name}\n"
+            f"Нарушитель: @{violator.username or violator.first_name}\n"
+            f"Причина: {reason}"
+        )
         await bot.send_message(
-            chat_id=int(hublox_id),
-            message_thread_id=TOPIC_ANNOUNCEMENTS,
-            text=f"📢 **Обновление правил v{new_version}**\n\n{new_text}",
+            chat_id=int(hubsup_id),
+            message_thread_id=TOPIC_REPORTS_HUBSUP,
+            text=report_text,
             parse_mode="Markdown"
         )
-    await message.answer(f"✅ Правила обновлены до версии {new_version}!")
+        await message.reply(f"✅ Репорт отправлен. Администрация рассмотрит.")
+    else:
+        await message.reply("⚠️ Бот не связан с чатом администрации.")
+
+def is_mod_command_allowed(message: Message) -> bool:
+    if not message.reply_to_message:
+        return False
+    return is_creator_or_moderator(message.from_user.id)
+
+@dp.message(Command("warn"))
+async def manual_warn(message: Message):
+    if not is_mod_command_allowed(message):
+        await message.answer("⛔ Доступно только модераторам и создателю, используйте как ответ на сообщение.")
+        return
+    user = message.reply_to_message.from_user
+    reason = message.text.replace("/warn", "").strip() or "Нарушение правил"
+    warn_count, warn_id = add_warn(user.id, reason)
+    user_mention = f"@{user.username}" if user.username else user.first_name
+
+    action = ""
+    if warn_count == 1:
+        action = "предупреждение"
+    elif warn_count == 2:
+        action = "мут 30 мин"
+        until = datetime.now() + timedelta(minutes=30)
+        await bot.restrict_chat_member(message.chat.id, user.id, permissions=ChatPermissions(can_send_messages=False), until_date=until)
+    elif warn_count == 3:
+        action = "мут 24 ч"
+        until = datetime.now() + timedelta(hours=24)
+        await bot.restrict_chat_member(message.chat.id, user.id, permissions=ChatPermissions(can_send_messages=False), until_date=until)
+    else:
+        action = "бан навсегда"
+        await bot.ban_chat_member(message.chat.id, user.id)
+        cursor.execute("UPDATE users SET banned=1, ban_until=NULL WHERE user_id=?", (user.id,))
+        conn.commit()
+
+    template = get_template('warn_template')
+    msg_text = template.format(user=user_mention, warn=warn_count, warn_id=warn_id)
+    await message.reply(msg_text)
+
+    hubsup_id = get_config("hubsup_id")
+    if hubsup_id:
+        await bot.send_message(
+            chat_id=int(hubsup_id),
+            message_thread_id=TOPIC_MOD_CHAT,
+            text=f"🛠 **Ручной варн**\nМодератор: @{message.from_user.username or message.from_user.first_name}\nПользователь: {user_mention}\nПричина: {reason}\nДействие: {action}",
+            parse_mode="Markdown"
+        )
+
+@dp.message(Command("ban"))
+async def manual_ban(message: Message):
+    if not is_mod_command_allowed(message):
+        await message.answer("⛔ Доступно только модераторам и создателю, используйте как ответ на сообщение.")
+        return
+    user = message.reply_to_message.from_user
+    reason = message.text.replace("/ban", "").strip() or "Нарушение правил"
+    await bot.ban_chat_member(message.chat.id, user.id)
+    cursor.execute("UPDATE users SET banned=1, ban_until=NULL WHERE user_id=?", (user.id,))
+    conn.commit()
+    user_mention = f"@{user.username}" if user.username else user.first_name
+    template = get_template('ban_template')
+    msg_text = template.format(user=user_mention)
+    await message.reply(f"{msg_text}\nПричина: {reason}")
+
+@dp.message(Command("unban"))
+async def manual_unban(message: Message):
+    if not is_mod_command_allowed(message):
+        await message.answer("⛔ Доступно только модераторам и создателю, используйте как ответ на сообщение.")
+        return
+    user = message.reply_to_message.from_user
+    await bot.unban_chat_member(message.chat.id, user.id)
+    cursor.execute("UPDATE users SET banned=0, ban_until=NULL WHERE user_id=?", (user.id,))
+    conn.commit()
+    user_mention = f"@{user.username}" if user.username else user.first_name
+    template = get_template('unban_template')
+    msg_text = template.format(user=user_mention)
+    await message.reply(msg_text)
+
+@dp.message(Command("unwarn"))
+async def manual_unwarn(message: Message):
+    if not is_mod_command_allowed(message):
+        await message.answer("⛔ Доступно только модераторам и создателю, используйте как ответ на сообщение.")
+        return
+    user = message.reply_to_message.from_user
+    remove_all_warns(user.id)
+    user_mention = f"@{user.username}" if user.username else user.first_name
+    template = get_template('unwarn_template')
+    msg_text = template.format(user=user_mention)
+    await message.reply(msg_text)
+
+@dp.message(Command("redact"))
+async def redact_menu(message: Message):
+    if message.from_user.id != CREATOR_ID:
+        await message.answer("⛔ Доступно только создателю.")
+        return
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📜 Rules", callback_data="redact_rules")],
+        [InlineKeyboardButton(text="⚠️ Warn", callback_data="redact_warn")],
+        [InlineKeyboardButton(text="🚫 Ban", callback_data="redact_ban")],
+        [InlineKeyboardButton(text="🔔 Alerts", callback_data="redact_alerts")],
+        [InlineKeyboardButton(text="👋 Welcome", callback_data="redact_welcome")],
+        [InlineKeyboardButton(text="✅ Unban", callback_data="redact_unban")],
+        [InlineKeyboardButton(text="🔄 Unwarn", callback_data="redact_unwarn")],
+        [InlineKeyboardButton(text="📩 Appeal", callback_data="redact_appeal")],
+    ])
+    await message.answer("📝 Выберите, что хотите изменить:", reply_markup=keyboard)
+
+@dp.callback_query(lambda c: c.data.startswith("redact_"))
+async def process_redact_callback(callback: CallbackQuery, state: FSMContext):
+    await callback.answer()
+    key_map = {
+        "redact_rules": "rules_version",
+        "redact_warn": "warn_template",
+        "redact_ban": "ban_template",
+        "redact_alerts": "rules_version",
+        "redact_welcome": "welcome_template",
+        "redact_unban": "unban_template",
+        "redact_unwarn": "unwarn_template",
+        "redact_appeal": "appeal_template"
+    }
+    action = callback.data
+    if action == "redact_alerts":
+        await callback.message.answer("Введите текст для уведомления об обновлении правил (используйте {version}):")
+        await state.set_state(RedactStates.waiting_for_input)
+        await state.update_data(redact_key="alerts_text")
+        return
+    if action == "redact_rules":
+        await callback.message.answer("Введите новые правила (полный список):")
+        await state.set_state(RedactStates.waiting_for_input)
+        await state.update_data(redact_key="rules")
+        return
+    if action == "redact_appeal":
+        await callback.message.answer("Введите список администраторов (по одному на строку, без @):")
+        await state.set_state(RedactStates.waiting_for_input)
+        await state.update_data(redact_key="admins")
+        return
+    key = key_map.get(action)
+    if not key:
+        await callback.message.answer("Неизвестная опция.")
+        return
+    current = get_template(key)
+    await callback.message.answer(f"Текущее значение:\n{current}\n\nВведите новый текст (используйте плейсхолдеры {user}, {warn}, {warn_id} где нужно):")
+    await state.set_state(RedactStates.waiting_for_input)
+    await state.update_data(redact_key=key)
+
+@dp.message(RedactStates.waiting_for_input)
+async def process_redact_input(message: Message, state: FSMContext):
+    data = await state.get_data()
+    redact_key = data.get("redact_key")
+    new_text = message.text
+
+    if redact_key == "rules":
+        current_version = get_template('rules_version')
+        major, minor = map(int, current_version.split('.'))
+        minor += 1
+        new_version = f"{major}.{minor}"
+        set_template('rules_version', new_version)
+        update_rules(new_version, new_text)
+        hublox_id = get_config("hublox_id")
+        if hublox_id:
+            await bot.send_message(
+                chat_id=int(hublox_id),
+                message_thread_id=TOPIC_RULES,
+                text=f"📜 **Правила чата HuBBlox (v{new_version})**\n\n{new_text}",
+                parse_mode="Markdown"
+            )
+            for topic in [TOPIC_CHAT, TOPIC_TRADES, TOPIC_RAIDS, TOPIC_ANNOUNCEMENTS]:
+                if topic:
+                    await bot.send_message(
+                        chat_id=int(hublox_id),
+                        message_thread_id=topic,
+                        text=f"🔔 **Правила сообщества обновлены!**\nВерсия {new_version}. Ознакомьтесь в теме «Правила».",
+                        parse_mode="Markdown"
+                    )
+        await message.answer(f"✅ Правила обновлены до версии {new_version}!")
+    elif redact_key == "alerts_text":
+        set_template("alerts_template", new_text)
+        await message.answer("✅ Шаблон уведомлений обновлён!")
+    elif redact_key == "admins":
+        set_template("admins_list", new_text)
+        await message.answer("✅ Список администраторов обновлён!")
+    else:
+        set_template(redact_key, new_text)
+        await message.answer(f"✅ Шаблон обновлён!")
+
+    await state.clear()
+
+@dp.message(Command("stats"))
+async def stats_cmd(message: Message):
+    if not is_creator_or_moderator(message.from_user.id):
+        return await message.answer("⛔ Доступно только создателю и модераторам.")
+    now = datetime.now()
+    day_ago = int((now - timedelta(days=1)).timestamp())
+    week_ago = int((now - timedelta(days=7)).timestamp())
+    cursor.execute("SELECT COUNT(*) FROM violations WHERE created_at >= ?", (day_ago,))
+    day_count = cursor.fetchone()[0]
+    cursor.execute("SELECT COUNT(*) FROM violations WHERE created_at >= ?", (week_ago,))
+    week_count = cursor.fetchone()[0]
+    cursor.execute("SELECT COUNT(*) FROM violations")
+    total_count = cursor.fetchone()[0]
+    await message.answer(
+        f"📊 **Статистика нарушений**\n"
+        f"За день: {day_count}\n"
+        f"За неделю: {week_count}\n"
+        f"Всего: {total_count}"
+    )
 
 @dp.message(Command("addmod"))
 async def add_moderator(message: Message):
@@ -588,8 +672,11 @@ async def remove_moderator(message: Message):
 
 @dp.message(Command("appeal"))
 async def appeal_start(message: Message, state: FSMContext):
-    await message.answer("📝 Напишите текст вашей аппеляции. Опишите ситуацию подробно.")
-    await state.set_state(AppealStates.waiting_for_text)
+    if message.chat.type == "private":
+        await message.answer("📝 Напишите номер вашего варна/бана и ваше оправдание.")
+        await state.set_state(AppealStates.waiting_for_text)
+    else:
+        await message.answer("📝 Используйте /appeal в личных сообщениях боту.")
 
 @dp.message(AppealStates.waiting_for_text)
 async def appeal_text(message: Message, state: FSMContext):
@@ -605,9 +692,9 @@ async def appeal_text(message: Message, state: FSMContext):
     hubsup_id = get_config("hubsup_id")
     if hubsup_id:
         report = (
-            f"📩 **Апелляция {number}**\n"
+            f"📩 **Аппеляция {number}**\n"
             f"От: @{username}\n"
-            f"Текст:\n> {appeal_text}"
+            f"Текст:\n{appeal_text}"
         )
         await bot.send_message(
             chat_id=int(hubsup_id),
@@ -615,32 +702,32 @@ async def appeal_text(message: Message, state: FSMContext):
             text=report,
             parse_mode="Markdown"
         )
-    await message.answer(f"✅ Ваша аппеляция {number} принята. Администрация рассмотрит её в ближайшее время.")
+    await message.answer(f"✅ Ваша аппеляция {number} принята. Администрация рассмотрит её.")
     await state.clear()
 
-@dp.message(Command("stats"))
-async def stats_cmd(message: Message):
-    if not is_creator_or_moderator(message.from_user.id):
-        return await message.answer("⛔ Доступно только создателю и модераторам.")
-    now = datetime.now()
-    day_ago = int((now - timedelta(days=1)).timestamp())
-    week_ago = int((now - timedelta(days=7)).timestamp())
-    cursor.execute("SELECT COUNT(*) FROM violations WHERE created_at >= ?", (day_ago,))
-    day_count = cursor.fetchone()[0]
-    cursor.execute("SELECT COUNT(*) FROM violations WHERE created_at >= ?", (week_ago,))
-    week_count = cursor.fetchone()[0]
-    cursor.execute("SELECT COUNT(*) FROM violations")
-    total_count = cursor.fetchone()[0]
-    await message.answer(
-        f"📊 **Статистика нарушений**\n"
-        f"За день: {day_count}\n"
-        f"За неделю: {week_count}\n"
-        f"Всего: {total_count}"
-    )
+# ======================= ОБРАБОТЧИК НОВЫХ УЧАСТНИКОВ =======================
+@dp.message(content_types=ContentType.NEW_CHAT_MEMBERS)
+async def welcome_new_member(message: Message):
+    if str(message.chat.id) != get_config("hublox_id"):
+        return
+    for member in message.new_chat_members:
+        if member.id == bot.id:
+            continue
+        user_mention = f"@{member.username}" if member.username else member.full_name
+        template = get_template('welcome_template')
+        msg_text = template.format(user=user_mention)
+        await bot.send_message(
+            chat_id=message.chat.id,
+            message_thread_id=TOPIC_WELCOME,
+            text=msg_text
+        )
 
-# ======================= ОБРАБОТЧИК ВСЕХ СООБЩЕНИЙ =======================
+# ======================= ОБРАБОТЧИК ВСЕХ СООБЩЕНИЙ (МОДЕРАЦИЯ) =======================
 @dp.message()
 async def handle_all_messages(message: Message):
+    if message.message_thread_id in NO_INTERACTION_TOPICS:
+        return
+
     hublox_id = get_config("hublox_id")
     if not hublox_id or str(message.chat.id) != hublox_id:
         return
@@ -658,13 +745,15 @@ async def handle_all_messages(message: Message):
     if not message.text:
         return
 
+    # Проверяем на оскорбление через Lakera (без локальной модели)
     if await is_insult(message.text):
-        await process_violation(message, message.text, "оскорбление")
+        is_reply = message.reply_to_message is not None
+        await process_violation(message, message.text, "оскорбление", is_reply)
 
 # ======================= ФУНКЦИЯ ОБРАБОТКИ НАРУШЕНИЙ =======================
-async def process_violation(message: Message, text: str, msg_type: str):
+async def process_violation(message: Message, text: str, msg_type: str, is_reply: bool):
     user = message.from_user
-    warn_count = add_warn(user.id)
+    warn_count, warn_id = add_warn(user.id, text)
     user_mention = f"@{user.username}" if user.username else user.first_name
 
     action = ""
@@ -673,49 +762,36 @@ async def process_violation(message: Message, text: str, msg_type: str):
     elif warn_count == 2:
         action = "мут 30 мин"
         until = datetime.now() + timedelta(minutes=30)
-        await bot.restrict_chat_member(
-            chat_id=message.chat.id,
-            user_id=user.id,
-            permissions=ChatPermissions(can_send_messages=False),
-            until_date=until
-        )
+        await bot.restrict_chat_member(message.chat.id, user.id, permissions=ChatPermissions(can_send_messages=False), until_date=until)
     elif warn_count == 3:
         action = "мут 24 ч"
         until = datetime.now() + timedelta(hours=24)
-        await bot.restrict_chat_member(
-            chat_id=message.chat.id,
-            user_id=user.id,
-            permissions=ChatPermissions(can_send_messages=False),
-            until_date=until
-        )
+        await bot.restrict_chat_member(message.chat.id, user.id, permissions=ChatPermissions(can_send_messages=False), until_date=until)
     else:
         action = "бан навсегда"
-        await bot.ban_chat_member(chat_id=message.chat.id, user_id=user.id)
+        await bot.ban_chat_member(message.chat.id, user.id)
         cursor.execute("UPDATE users SET banned=1, ban_until=NULL WHERE user_id=?", (user.id,))
         conn.commit()
 
-    if warn_count < 4:
-        template = get_template('warn_template')
-        msg_text = template.format(user=user_mention, warn=warn_count)
-    else:
-        template = get_template('ban_template')
-        msg_text = template.format(user=user_mention, warn=warn_count)
+    template = get_template('warn_template')
+    msg_text = template.format(user=user_mention, warn=warn_count, warn_id=warn_id)
     await message.reply(msg_text)
 
     cursor.execute(
-        "INSERT INTO violations (user_id, username, text, action, created_at) VALUES (?, ?, ?, ?, ?)",
-        (user.id, user.username, text, action, int(datetime.now().timestamp()))
+        "INSERT INTO violations (user_id, username, text, action, is_reply, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+        (user.id, user.username, text, action, is_reply, int(datetime.now().timestamp()))
     )
     conn.commit()
 
     hubsup_id = get_config("hubsup_id")
     if hubsup_id:
+        reply_text = " (в ответ на сообщение)" if is_reply else ""
         report = (
-            f"🚨 **Нарушение в HuBBlox**\n"
+            f"🚨 **Нарушение в HuBBlox**{reply_text}\n"
             f"Пользователь: {user_mention}\n"
             f"Тип: {msg_type}\n"
             f"Текст: `{text}`\n"
-            f"Наказание: {action} (варн #{warn_count})"
+            f"Наказание: {action} (варн {warn_id})"
         )
         await bot.send_message(
             chat_id=int(hubsup_id),
@@ -724,7 +800,7 @@ async def process_violation(message: Message, text: str, msg_type: str):
             parse_mode="Markdown"
         )
 
-# ======================= ВЕБ-СЕРВЕР ДЛЯ RENDER (чтобы не было "no open ports") =======================
+# ======================= ВЕБ-СЕРВЕР ДЛЯ RENDER =======================
 app = Flask('')
 
 @app.route('/')
@@ -735,14 +811,13 @@ def run_web():
     port = int(os.environ.get('PORT', 8080))
     app.run(host='0.0.0.0', port=port)
 
-# ======================= ЗАПУСК БОТА И ВЕБ-СЕРВЕРА =======================
+# ======================= ЗАПУСК =======================
 async def main():
     logging.basicConfig(level=logging.INFO)
+    asyncio.create_task(check_expired_warns())
     print("Duosup запущен!")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    # Запускаем веб-сервер в отдельном потоке, чтобы не блокировать бота
     threading.Thread(target=run_web, daemon=True).start()
-    # Запускаем бота
     asyncio.run(main())
