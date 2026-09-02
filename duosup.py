@@ -1,3 +1,4 @@
+import os
 import asyncio
 import logging
 import sqlite3
@@ -16,6 +17,12 @@ from aiogram.fsm.storage.memory import MemoryStorage
 # ======================= НАСТРОЙКИ =======================
 BOT_TOKEN = "8970388836:AAH0cFseraGhVRMRb1WB0_gh-PzbjjVhYJA"
 CREATOR_ID = 7675985792
+
+# ======================= ПУТЬ К БАЗЕ ДАННЫХ =======================
+if os.path.exists("/data"):
+    DB_PATH = "/data/duosup.db"
+else:
+    DB_PATH = "duosup.db"
 
 # ======================= ID ТЕМ =======================
 # HubSup (Администрация)
@@ -39,7 +46,7 @@ TOPIC_TRADES = 8
 IGNORED_TOPICS = [TOPIC_ADMIN, TOPIC_APPEALS_HUBBLOX]
 
 # ======================= БАЗА ДАННЫХ =======================
-conn = sqlite3.connect("duosup.db", check_same_thread=False)
+conn = sqlite3.connect(DB_PATH, check_same_thread=False)
 cursor = conn.cursor()
 
 cursor.execute('''
@@ -153,7 +160,7 @@ CREATE TABLE IF NOT EXISTS templates (
 )
 ''')
 
-# Шаблоны (только приветствие и версия правил)
+# Шаблоны
 defaults = {
     'welcome_template': '{user}\nДобро пожаловать в HuBBlox\nПожалуйста ознакомтесь с правилами сообщества.',
     'rules_version': '1.0'
@@ -166,7 +173,7 @@ cursor.execute("INSERT OR IGNORE INTO config (key, value) VALUES ('hublox_id', '
 cursor.execute("INSERT OR IGNORE INTO config (key, value) VALUES ('hubsup_id', '')")
 conn.commit()
 
-# ======================= ГЛОБАЛЬНЫЕ СЧЁТЧИКИ =======================
+# ======================= СЧЁТЧИКИ =======================
 def get_next_number(counter_name):
     cursor.execute("SELECT value FROM config WHERE key=?", (counter_name,))
     row = cursor.fetchone()
@@ -182,7 +189,6 @@ def get_next_number(counter_name):
 
 # ======================= ФУНКЦИИ =======================
 def format_number(num):
-    """Форматирует число в #-000.000"""
     return f"#-{(num // 1000):03d}.{(num % 1000):03d}"
 
 def get_config(key):
@@ -276,7 +282,6 @@ def parse_target_user(message):
             row = cursor.fetchone()
             if row:
                 return row[0], username, None
-            # Если не нашли, можно попробовать через API, но оставим как есть
             return None
         except:
             return None
@@ -320,6 +325,45 @@ def get_role_name(level):
         5: "Главный администратор"
     }
     return roles.get(level, f"Уровень {level}")
+
+async def set_admin_rights(chat_id, user_id, is_admin=True):
+    """Назначает или снимает права администратора в конкретном чате"""
+    if is_admin:
+        # Даём минимальные права: удалять, банить/мутить, читать сообщения
+        await bot.promote_chat_member(
+            chat_id=chat_id,
+            user_id=user_id,
+            can_delete_messages=True,
+            can_restrict_members=True,
+            can_invite_users=False,
+            can_change_info=False,
+            can_pin_messages=False,
+            can_promote_members=False,
+            can_manage_topics=False,
+            can_manage_video_chats=False,
+            can_manage_chat=False,
+            can_post_stories=False,
+            can_edit_stories=False,
+            can_delete_stories=False
+        )
+    else:
+        # Снимаем все права (понижаем до обычного пользователя)
+        await bot.promote_chat_member(
+            chat_id=chat_id,
+            user_id=user_id,
+            can_delete_messages=False,
+            can_restrict_members=False,
+            can_invite_users=False,
+            can_change_info=False,
+            can_pin_messages=False,
+            can_promote_members=False,
+            can_manage_topics=False,
+            can_manage_video_chats=False,
+            can_manage_chat=False,
+            can_post_stories=False,
+            can_edit_stories=False,
+            can_delete_stories=False
+        )
 
 async def update_admin_list():
     cursor.execute("SELECT user_id, username, level, role FROM moderators ORDER BY level DESC")
@@ -367,14 +411,14 @@ async def update_admin_list():
         )
         set_config("adminlist_msg_hublox", str(sent.message_id))
 
-# ======================= КЛАССЫ FSM =======================
+# ======================= FSM =======================
 class AppealStates(StatesGroup):
     waiting_for_appeal = State()
 
 class RedactRuleStates(StatesGroup):
     waiting_for_rule = State()
 
-# ======================= ИНИЦИАЛИЗАЦИЯ БОТА =======================
+# ======================= БОТ =======================
 storage = MemoryStorage()
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=storage)
@@ -509,7 +553,14 @@ async def upmod_cmd(message: Message):
         cursor.execute("INSERT INTO moderators (user_id, username, level, role) VALUES (?, ?, ?, ?)",
                        (user_id, username, new_level, get_role_name(new_level)))
     conn.commit()
-    await message.answer(f"✅ @{username} повышен до уровня {new_level} ({get_role_name(new_level)}).")
+    # Назначаем права администратора в обоих чатах
+    hublox_id = get_config("hublox_id")
+    hubsup_id = get_config("hubsup_id")
+    if hublox_id:
+        await set_admin_rights(int(hublox_id), user_id, is_admin=True)
+    if hubsup_id:
+        await set_admin_rights(int(hubsup_id), user_id, is_admin=True)
+    await message.answer(f"✅ @{username} повышен до уровня {new_level} ({get_role_name(new_level)}) и получил права администратора.")
     await update_admin_list()
 
 @dp.message(Command("downmod"))
@@ -537,7 +588,14 @@ async def downmod_cmd(message: Message):
     new_level = current_level - 1
     if new_level == 0:
         cursor.execute("DELETE FROM moderators WHERE user_id=?", (user_id,))
-        await message.answer(f"✅ @{username} понижен до уровня 0 (участник) и удалён из списка модераторов.")
+        # Снимаем права администратора в обоих чатах
+        hublox_id = get_config("hublox_id")
+        hubsup_id = get_config("hubsup_id")
+        if hublox_id:
+            await set_admin_rights(int(hublox_id), user_id, is_admin=False)
+        if hubsup_id:
+            await set_admin_rights(int(hubsup_id), user_id, is_admin=False)
+        await message.answer(f"✅ @{username} понижен до уровня 0 (участник) и удалён из списка модераторов, права администратора сняты.")
     else:
         cursor.execute("UPDATE moderators SET level=?, role=? WHERE user_id=?", (new_level, get_role_name(new_level), user_id))
         await message.answer(f"✅ @{username} понижен до уровня {new_level} ({get_role_name(new_level)}).")
@@ -552,7 +610,7 @@ async def warn_cmd(message: Message):
         return
     target = parse_target_user(message)
     if not target:
-        await message.answer("⚠️ Используйте команду как ответ на сообщение или укажите @username.")
+        await message.answer("⚠️ Пожалуйста, ответьте на сообщение нарушителя с причиной либо введите @Username нарушителя.")
         return
     user_id, username, msg_id = target
     if user_id == CREATOR_ID:
@@ -609,11 +667,10 @@ async def warn_cmd(message: Message):
     if hubsup_id:
         report = (
             f"**ВЫДАН ВАРН** ⚠️\n"
-            f"Цитирование: {reason}\n"
+            f"Причина: {reason}\n"
             f"ID варна: {warn_number}\n"
             f"Пользователь: {user_mention}\n"
             f"ID: `{user_id}`\n"
-            f"Причина: {reason}\n"
             f"Предупреждений: {warn_count}/4\n"
             f"Кем выдан: @{message.from_user.username or message.from_user.first_name}\n"
             f"Чат ID: `{message.chat.id}`\n"
@@ -633,7 +690,11 @@ async def warn_cmd(message: Message):
         )
 
     if warn_count >= 4:
-        await bot.ban_chat_member(message.chat.id, user_id)
+        await bot.restrict_chat_member(
+            chat_id=message.chat.id,
+            user_id=user_id,
+            permissions=ChatPermissions(can_send_messages=False)
+        )
         cursor.execute("UPDATE users SET banned=1, ban_until=NULL WHERE user_id=?", (user_id,))
         conn.commit()
 
@@ -645,7 +706,7 @@ async def ban_cmd(message: Message):
         return
     target = parse_target_user(message)
     if not target:
-        await message.answer("⚠️ Используйте команду как ответ на сообщение или укажите @username.")
+        await message.answer("⚠️ Пожалуйста, ответьте на сообщение нарушителя с причиной либо введите @Username нарушителя.")
         return
     user_id, username, msg_id = target
     if user_id == CREATOR_ID:
@@ -662,7 +723,11 @@ async def ban_cmd(message: Message):
         await message.answer("⚠️ Пользователь уже забанен.")
         return
 
-    await bot.ban_chat_member(message.chat.id, user_id)
+    await bot.restrict_chat_member(
+        chat_id=message.chat.id,
+        user_id=user_id,
+        permissions=ChatPermissions(can_send_messages=False)
+    )
     cursor.execute("UPDATE users SET banned=1, ban_until=NULL WHERE user_id=?", (user_id,))
     conn.commit()
     ban_number = get_next_ban_number()
@@ -693,11 +758,10 @@ async def ban_cmd(message: Message):
     if hubsup_id:
         report = (
             f"**ВЫДАН БАН** ⚠️\n"
-            f"Цитирование: {reason}\n"
+            f"Причина: {reason}\n"
             f"ID бана: {ban_number}\n"
             f"Пользователь: {user_mention}\n"
             f"ID: `{user_id}`\n"
-            f"Причина: {reason}\n"
             f"Кем выдан: @{message.from_user.username or message.from_user.first_name}\n"
             f"Чат ID: `{message.chat.id}`\n"
             f"Время выдачи: {datetime.now().strftime('%H:%M:%S')} по МКС"
@@ -723,7 +787,7 @@ async def unwarn_cmd(message: Message):
         return
     target = parse_target_user(message)
     if not target:
-        await message.answer("⚠️ Используйте команду как ответ на сообщение или укажите @username.")
+        await message.answer("⚠️ Пожалуйста, ответьте на сообщение нарушителя либо введите @Username.")
         return
     user_id, username, msg_id = target
     if user_id == CREATOR_ID:
@@ -759,7 +823,7 @@ async def unwarn_cmd(message: Message):
     if hubsup_id:
         report = (
             f"**СНЯТ ВАРН** ⚠️\n"
-            f"Цитирование: (снятие варнов)\n"
+            f"Причина: (снятие варнов)\n"
             f"Номер снятия: {unwarn_number}\n"
             f"Пользователь: {user_mention}\n"
             f"ID: `{user_id}`\n"
@@ -789,7 +853,7 @@ async def unban_cmd(message: Message):
         return
     target = parse_target_user(message)
     if not target:
-        await message.answer("⚠️ Используйте команду как ответ на сообщение или укажите @username.")
+        await message.answer("⚠️ Пожалуйста, ответьте на сообщение нарушителя либо введите @Username.")
         return
     user_id, username, msg_id = target
     if user_id == CREATOR_ID:
@@ -798,7 +862,11 @@ async def unban_cmd(message: Message):
     if not is_banned(user_id):
         await message.answer("⚠️ Пользователь не забанен.")
         return
-    await bot.unban_chat_member(message.chat.id, user_id)
+    await bot.restrict_chat_member(
+        chat_id=message.chat.id,
+        user_id=user_id,
+        permissions=ChatPermissions(can_send_messages=True)
+    )
     cursor.execute("UPDATE users SET banned=0, ban_until=NULL WHERE user_id=?", (user_id,))
     conn.commit()
     unban_number = get_next_unban_number()
@@ -826,7 +894,7 @@ async def unban_cmd(message: Message):
     if hubsup_id:
         report = (
             f"**СНЯТ БАН** ⚠️\n"
-            f"Цитирование: (разбан)\n"
+            f"Причина: (разбан)\n"
             f"Номер снятия: {unban_number}\n"
             f"Пользователь: {user_mention}\n"
             f"ID: `{user_id}`\n"
@@ -1047,6 +1115,123 @@ async def welcome_new_member(message: Message):
             chat_id=message.chat.id,
             message_thread_id=TOPIC_WELCOME,
             text=msg
+        )
+
+# ======================= ОСНОВНОЙ ОБРАБОТЧИК ТЕКСТОВЫХ СООБЩЕНИЙ =======================
+@dp.message(F.text)
+async def handle_all_messages(message: Message):
+    # Обработка команды "Бот"
+    if message.text.lower() == "бот":
+        await message.reply("На месте ✅")
+        return
+
+    # Игнорируем сообщения из запрещённых тем
+    if message.message_thread_id in IGNORED_TOPICS:
+        return
+
+    # Проверяем, что сообщение из HuBBlox (основной чат)
+    hublox_id = get_config("hublox_id")
+    if not hublox_id or str(message.chat.id) != hublox_id:
+        return
+
+    # Проверка на ссылки (только не создатель)
+    if message.from_user.id != CREATOR_ID:
+        if re.search(r'https?://\S+', message.text):
+            # Выдаём варн за ссылку
+            await process_violation(message, message.text, "ссылка", is_reply=False)
+            return
+
+    # Проверка бана
+    if is_banned(message.from_user.id):
+        await message.delete()
+        await message.answer("Вы забанены и не можете писать.")
+        return
+
+    # Остальная логика (без ИИ)
+    # Здесь можно добавить другие проверки, но пока только ссылки.
+    # Сообщение без нарушений игнорируем.
+
+# ======================= ФУНКЦИЯ ОБРАБОТКИ НАРУШЕНИЙ =======================
+async def process_violation(message: Message, text: str, msg_type: str, is_reply: bool):
+    user = message.from_user
+    # Проверяем, не забанен ли уже
+    if is_banned(user.id):
+        return
+    warn_count, warn_id = add_warn(user.id, f"Нарушение: {msg_type}", bot.id, message.chat.id, message.message_id)
+    user_mention = f"@{user.username}" if user.username else f"[{user.id}](tg://user?id={user.id})"
+    warn_number = format_number(warn_id)
+
+    # Определяем наказание
+    action = ""
+    if warn_count == 1:
+        action = "предупреждение"
+    elif warn_count == 2:
+        action = "мут 5 мин"
+        until = datetime.now() + timedelta(minutes=5)
+        await bot.restrict_chat_member(message.chat.id, user.id, permissions=ChatPermissions(can_send_messages=False), until_date=until)
+    elif warn_count == 3:
+        action = "мут 24 ч"
+        until = datetime.now() + timedelta(hours=24)
+        await bot.restrict_chat_member(message.chat.id, user.id, permissions=ChatPermissions(can_send_messages=False), until_date=until)
+    else:
+        action = "бан"
+        await bot.restrict_chat_member(message.chat.id, user.id, permissions=ChatPermissions(can_send_messages=False))
+        cursor.execute("UPDATE users SET banned=1, ban_until=NULL WHERE user_id=?", (user.id,))
+        conn.commit()
+
+    # Сообщение в чат
+    levels = [
+        ("предупреждение", 1),
+        ("мут на 5 минут", 2),
+        ("мут на 24 часа", 3),
+        ("бан", 4)
+    ]
+    level_lines = []
+    for label, level in levels:
+        if level == warn_count:
+            level_lines.append(f" • {level}/4 - {label} {chr(9888)}")
+        else:
+            level_lines.append(f" • {level}/4 - {label}")
+    levels_text = "\n".join(level_lines)
+
+    chat_msg = (
+        f"{user_mention} получает варн ({warn_count}/4) ⚠️\n"
+        f"Причина: «{text}»\n"
+        f"— · — · — · — · — · — · —\n"
+        f"{levels_text}\n"
+        f"— · — · — · — · — · — · —\n"
+        f"ID варна: {warn_number}\n"
+        f"— · — · — · — · — · — · —"
+    )
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Подать аппеляцию", url="https://t.me/duosup_bot")],
+        [InlineKeyboardButton(text="Перейти к сообщению", url=f"https://t.me/c/{message.chat.id}/{message.message_id}")]
+    ])
+    await message.reply(chat_msg, parse_mode="Markdown", reply_markup=keyboard)
+
+    # Отчёт в админ-чат
+    hubsup_id = get_config("hubsup_id")
+    if hubsup_id:
+        report = (
+            f"**ВЫДАН ВАРН** ⚠️\n"
+            f"Причина: {text}\n"
+            f"ID варна: {warn_number}\n"
+            f"Пользователь: {user_mention}\n"
+            f"ID: `{user.id}`\n"
+            f"Предупреждений: {warn_count}/4\n"
+            f"Кем выдан: бот (автоматически)\n"
+            f"Чат ID: `{message.chat.id}`\n"
+            f"Время выдачи: {datetime.now().strftime('%H:%M:%S')} по МКС"
+        )
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Перейти к сообщению", url=f"https://t.me/c/{message.chat.id}/{message.message_id}")]
+        ])
+        await bot.send_message(
+            chat_id=int(hubsup_id),
+            message_thread_id=TOPIC_MOD_CHAT,
+            text=report,
+            parse_mode="Markdown",
+            reply_markup=kb
         )
 
 # ======================= ЗАПУСК =======================
