@@ -233,21 +233,39 @@ async def check_permission(message, min_level):
     level = await get_moderator_level(message.from_user.id)
     return level >= min_level
 
-async def get_target_user_from_message(message):
+# ======================= ИСПРАВЛЕННАЯ ФУНКЦИЯ ОПРЕДЕЛЕНИЯ ЦЕЛИ =======================
+async def get_target_user_from_message(message: Message):
+    """
+    Определяет пользователя, на которого направлена команда.
+    Возвращает (user_id, username, message_id) или None.
+    """
+    # 1. Если это ответ на сообщение
     if message.reply_to_message:
         user = message.reply_to_message.from_user
-        return user.id, user.username, message.reply_to_message.message_id
+        if user:
+            return user.id, user.username, message.reply_to_message.message_id
+        else:
+            logging.warning("Reply to message but user is None")
+            return None
+
+    # 2. Если в тексте есть @username
     text = message.text
     match = re.search(r'@(\w+)', text)
     if match:
         username = match.group(1)
         try:
+            # Пытаемся получить пользователя через Telegram API
             chat = await bot.get_chat(f"@{username}")
-            return chat.id, username, None
-        except:
+            if chat:
+                return chat.id, chat.username, None
+        except Exception as e:
+            logging.error(f"Не удалось получить пользователя по @{username}: {e}")
             return None
+
+    # 3. Ничего не найдено
     return None
 
+# ======================= ОСТАЛЬНЫЕ ФУНКЦИИ =======================
 async def get_current_rules():
     row = await db.fetchrow("SELECT version, rule_text FROM rules ORDER BY created_at DESC LIMIT 1")
     return row[0], row[1] if row else None
@@ -600,7 +618,6 @@ async def warn_cmd(message: Message):
     warn_count, warn_number = await add_warn(user_id, reason, message.from_user.id, message.chat.id, msg_id)
     user_mention = f"@{username}" if username else f"[{user_id}](tg://user?id={user_id})"
 
-    # Формируем список уровней с ⚠️ только на текущем уровне
     levels = [
         ("предупреждение", 1),
         ("мут на 5 минут", 2),
@@ -1076,7 +1093,6 @@ async def process_violation(message: Message, text: str, msg_type: str):
     warn_count, warn_number = await add_warn(user.id, f"Нарушение: {msg_type}", bot.id, message.chat.id, message.message_id)
     user_mention = f"@{user.username}" if user.username else f"[{user.id}](tg://user?id={user.id})"
 
-    # Формируем список уровней с ⚠️ только на текущем уровне
     levels = [
         ("предупреждение", 1),
         ("мут на 5 минут", 2),
