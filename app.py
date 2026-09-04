@@ -18,7 +18,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 # ========================== НАСТРОЙКИ ==========================
 BOT_TOKEN = "8970388836:AAH0cFseraGhVRMRb1WB0_gh-PzbjjVhYJA"
 CREATOR_ID = 7675985792
-DATABASE_URL = "postgresql://postgres:kPDbfTTuTEvoTeOcitibgddkpMAKWUKH@postgres.railway.internal:5432/postgres"
+DATABASE_URL = "postgresql://postgres:kPDbfTTuTEvoTeOcitibgddkpMAKWUKH@postgres.railway.internal:5432/railway"  # вставлено!
 
 TOPICS = {
     "mod_chat": 6,
