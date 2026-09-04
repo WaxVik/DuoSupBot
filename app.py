@@ -148,6 +148,7 @@ async def check_permission(user_id, min_level):
     return level >= min_level
 
 async def can_punish(moderator_id, target_id, min_level_required):
+    # Создатель может всё
     if await is_creator(moderator_id):
         return True, None
     mod_level = await get_moderator_level(moderator_id)
@@ -160,22 +161,30 @@ async def can_punish(moderator_id, target_id, min_level_required):
         return False, "❌ Нельзя применить наказание к создателю."
     return True, None
 
+# ========== ИСПРАВЛЕННАЯ ФУНКЦИЯ get_target_user ==========
 async def get_target_user(message: Message):
+    # 1. Если это ответ на сообщение
     if message.reply_to_message:
         user = message.reply_to_message.from_user
         if user:
             return user.id, user.username, message.reply_to_message.message_id
         return None
-    text = message.text
-    match = re.search(r'@(\w+)', text)
-    if match:
-        username = match.group(1)
-        try:
-            chat = await bot.get_chat(f"@{username}")
-            if chat:
-                return chat.id, chat.username, None
-        except:
-            return None
+
+    # 2. Ищем упоминание через entities (более надёжно)
+    if message.entities:
+        for entity in message.entities:
+            if entity.type == "mention":
+                mention_text = message.text[entity.offset:entity.offset + entity.length]
+                username = mention_text.replace('@', '')
+                try:
+                    chat = await bot.get_chat(f"@{username}")
+                    if chat:
+                        return chat.id, chat.username, None
+                except Exception as e:
+                    logging.error(f"Ошибка получения пользователя @{username}: {e}")
+                    return None
+
+    # 3. Если ничего не найдено
     return None
 
 async def set_admin_rights(chat_id, user_id, is_admin=True, custom_title=None):
@@ -217,7 +226,6 @@ async def update_admin_list():
             uid, uname, lvl, role = row
             mention = f"@{uname}" if uname else f"[{uid}](tg://user?id={uid})"
             lines.append(f"{mention} — {role if role else get_role_name(lvl)}")
-        # Создатель не добавляется в список, он и так известен
         text = "👥 **Состав администрации:**\n" + "\n".join(lines)
 
     for chat_key, topic in [("hubsup_id", TOPICS["modlist"]), ("hublox_id", TOPICS["admin"])]:
@@ -242,6 +250,7 @@ storage = MemoryStorage()
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=storage)
 
+# ========================== КОМАНДЫ ==========================
 @dp.message(Command("start"))
 async def start_cmd(msg: Message):
     await msg.answer(
@@ -406,6 +415,7 @@ def build_warn_msg(user_mention, warn_count, reason, warn_number):
     level_lines = [f" • {i+1}/4 - {levels[i]} {'⚠️' if i+1 == warn_count else ''}" for i in range(4)]
     return f"{user_mention} получает варн ({warn_count}/4)\nПричина: «{reason}»\n— · —\n" + "\n".join(level_lines) + f"\n— · —\nID варна: {warn_number}\n— · —"
 
+# ========== /warn ==========
 @dp.message(Command("warn"))
 async def warn_cmd(msg: Message):
     if not await check_permission(msg.from_user.id, 2):
@@ -433,9 +443,11 @@ async def warn_cmd(msg: Message):
     warn_count, warn_number = await add_warn(uid, reason, msg.from_user.id, msg.chat.id, mid)
     mention = f"@{uname}" if uname else f"[{uid}](tg://user?id={uid})"
     chat_msg = build_warn_msg(mention, warn_count, reason, warn_number)
+    # В основном чате – только кнопка "Подать аппеляцию"
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Подать аппеляцию", url="https://t.me/duosup_bot")]])
     await msg.reply(chat_msg, parse_mode="Markdown", reply_markup=kb)
 
+    # Отчёт в админ-чат с кнопкой "Перейти к сообщению"
     hubsup = await get_config("hubsup_id")
     if hubsup:
         admin_text = (
@@ -465,6 +477,7 @@ async def warn_cmd(msg: Message):
         await bot.restrict_chat_member(msg.chat.id, uid, permissions=ChatPermissions(can_send_messages=False))
         await db.execute("UPDATE users SET banned=TRUE, ban_until=NULL WHERE user_id=$1", uid)
 
+# ========== /ban ==========
 @dp.message(Command("ban"))
 async def ban_cmd(msg: Message):
     if not await check_permission(msg.from_user.id, 3):
@@ -524,6 +537,7 @@ async def ban_cmd(msg: Message):
             reply_markup=admin_kb
         )
 
+# ========== /unwarn ==========
 @dp.message(Command("unwarn"))
 async def unwarn_cmd(msg: Message):
     if not await check_permission(msg.from_user.id, 4):
@@ -578,6 +592,7 @@ async def unwarn_cmd(msg: Message):
             reply_markup=admin_kb
         )
 
+# ========== /unban ==========
 @dp.message(Command("unban"))
 async def unban_cmd(msg: Message):
     if not await check_permission(msg.from_user.id, 5):
@@ -825,6 +840,7 @@ async def handle_links(msg: Message):
         await msg.delete()
         await msg.answer("Вы забанены и не можете писать.")
 
+# ========================== ЗАПУСК ==========================
 async def main():
     logging.basicConfig(level=logging.INFO)
     await init_db()
