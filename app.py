@@ -20,7 +20,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 
 # ========================== НАСТРОЙКИ ==========================
 BOT_TOKEN = "8970388836:AAEc_r1mZoswY_nKWTQOxcQbg3vXR4ehD8M"
-CREATOR_ID = 7675985792
+CREATOR_ID = 7675985792  # Твой ID
 DATABASE_URL = "postgresql://postgres:RsGrWajXqIorzUjiGwAJQiXoOqWzEYcx@postgres.railway.internal:5432/railway"
 
 TOPICS = {
@@ -185,7 +185,7 @@ async def can_punish(moderator_id, target_id):
         return False, "⛔ Ваш ранг слишком низок для выдачи наказаний.", mod_level, target_level
     return True, None, mod_level, target_level
 
-# ========================== ПАРСИНГ КОМАНД (ПОЛНОСТЬЮ ПЕРЕРАБОТАН) ==========================
+# ========================== НОВЫЙ, УЛУЧШЕННЫЙ ПАРСИНГ КОМАНД ==========================
 async def parse_warn_ban_command(message: Message, command_type: str):
     """
     Универсальный парсер для /warn и /ban.
@@ -212,26 +212,33 @@ async def parse_warn_ban_command(message: Message, command_type: str):
             return user.id, user.username, reason, message.reply_to_message.message_id
         return None, None, None, None
 
-    # 2. Ищем упоминание @username
-    mention_match = re.search(r'@(\w+)', text)
-    if mention_match:
-        username = mention_match.group(1)
-        logging.info(f"Found mention: @{username}")
+    # 2. Ищем все упоминания @username
+    mentions = re.findall(r'@(\w+)', text)
+    target = None
+    target_username = None
+    target_text = None
+
+    for username in mentions:
+        logging.info(f"Checking mention: @{username}")
         try:
             chat = await bot.get_chat(f"@{username}")
             if chat and chat.type == "private":
                 if chat.id == message.from_user.id:
                     logging.warning("Mention is the sender itself, skipping")
+                    continue
+                # Нашли цель
+                target = chat.id
+                target_username = chat.username
+                # Удаляем это упоминание из текста, чтобы получить причину
+                target_text = text.replace(f"@{username}", "").strip()
+                if not target_text:
+                    # Если причина пустая, возвращаем ошибку (будет поймана в обработчике)
                     return None, None, None, None
-                # Удаляем упоминание из текста, остаётся причина
-                reason = text.replace(f"@{username}", "").strip()
-                if not reason:
-                    return None, None, None, None
-                logging.info(f"Target via mention: {chat.id} ({chat.username})")
-                return chat.id, chat.username, reason, None
+                logging.info(f"Target via mention: {target} ({target_username})")
+                return target, target_username, target_text, None
         except Exception as e:
             logging.error(f"Error getting user @{username}: {e}")
-            return None, None, None, None
+            continue
 
     # 3. Ищем числовой ID (первый токен, если он число)
     parts = text.split()
@@ -243,15 +250,14 @@ async def parse_warn_ban_command(message: Message, command_type: str):
             if chat:
                 if chat.id == message.from_user.id:
                     logging.warning("ID is the sender itself, skipping")
-                    return None, None, None, None
-                reason = text.replace(parts[0], "").strip()
-                if not reason:
-                    return None, None, None, None
-                logging.info(f"Target via ID: {chat.id} ({chat.username})")
-                return chat.id, chat.username, reason, None
+                else:
+                    reason = text.replace(parts[0], "").strip()
+                    if not reason:
+                        return None, None, None, None
+                    logging.info(f"Target via ID: {chat.id} ({chat.username})")
+                    return chat.id, chat.username, reason, None
         except Exception as e:
             logging.error(f"Error getting user by ID {user_id}: {e}")
-            return None, None, None, None
 
     # 4. Если ничего не найдено
     logging.warning("No target found in message")
@@ -267,33 +273,29 @@ async def parse_unwarn_unban_command(message: Message, command_type: str):
     if not full_text.startswith(command):
         return None, None, None
 
-    # Убираем команду
     text = full_text[len(command):].strip()
     if not text:
-        # Если после команды ничего нет, пробуем reply
         if message.reply_to_message:
             user = message.reply_to_message.from_user
             if user:
                 return user.id, user.username, message.reply_to_message.message_id
         return None, None, None
 
-    # Проверяем reply
     if message.reply_to_message:
         user = message.reply_to_message.from_user
         if user:
             return user.id, user.username, message.reply_to_message.message_id
         return None, None, None
 
-    # Ищем упоминание
-    mention_match = re.search(r'@(\w+)', text)
-    if mention_match:
-        username = mention_match.group(1)
+    # Ищем упоминания
+    mentions = re.findall(r'@(\w+)', text)
+    for username in mentions:
         try:
             chat = await bot.get_chat(f"@{username}")
             if chat and chat.type == "private" and chat.id != message.from_user.id:
                 return chat.id, chat.username, None
         except:
-            pass
+            continue
 
     # Ищем ID
     parts = text.split()
@@ -549,11 +551,12 @@ def build_warn_msg(user_mention, warn_count, reason, warn_number):
     level_lines = [f" • {i+1}/4 - {levels[i]} {'⚠️' if i+1 == warn_count else ''}" for i in range(4)]
     return f"{user_mention} получает варн ({warn_count}/4)\nПричина: «{reason}»\n— · —\n" + "\n".join(level_lines) + f"\n— · —\nID варна: {warn_number}\n— · —"
 
-# ========================== КОМАНДА /warn ==========================
+# ========================== /warn ==========================
 @dp.message(Command("warn"))
 async def warn_cmd(msg: Message):
-    if not await check_permission(msg.from_user.id, 1):
-        await msg.answer("⛔ Ваш ранг слишком низок для выдачи варнов.")
+    # Проверка ранга: только 4,5,6,7 могут выдавать варны
+    if not await check_permission(msg.from_user.id, 4):
+        await msg.answer("⛔ Выдавать варны могут только администраторы (ранг 4+).")
         return
 
     target_id, target_username, reason, mid = await parse_warn_ban_command(msg, "warn")
@@ -627,11 +630,12 @@ async def warn_cmd(msg: Message):
         await bot.restrict_chat_member(msg.chat.id, target_id, permissions=ChatPermissions(can_send_messages=False))
         await db.execute("UPDATE users SET banned=TRUE, ban_until=NULL WHERE user_id=$1", target_id)
 
-# ========================== КОМАНДА /ban ==========================
+# ========================== /ban ==========================
 @dp.message(Command("ban"))
 async def ban_cmd(msg: Message):
-    if not await check_permission(msg.from_user.id, 3):
-        await msg.answer("⛔ Ваш ранг слишком низок для выдачи банов.")
+    # Проверка ранга: только 6 и 7 могут выдавать баны
+    if not await check_permission(msg.from_user.id, 6):
+        await msg.answer("⛔ Выдавать баны могут только Главный администратор и Создатель (ранг 6+).")
         return
 
     target_id, target_username, reason, mid = await parse_warn_ban_command(msg, "ban")
@@ -704,11 +708,12 @@ async def ban_cmd(msg: Message):
             reply_markup=admin_kb
         )
 
-# ========================== КОМАНДА /unwarn ==========================
+# ========================== /unwarn ==========================
 @dp.message(Command("unwarn"))
 async def unwarn_cmd(msg: Message):
-    if not await check_permission(msg.from_user.id, 4):
-        await msg.answer("⛔ Ваш ранг слишком низок для снятия варнов.")
+    # Проверка ранга: только 6 и 7 могут снимать варны
+    if not await check_permission(msg.from_user.id, 6):
+        await msg.answer("⛔ Снимать варны могут только Главный администратор и Создатель (ранг 6+).")
         return
 
     target = await parse_unwarn_unban_command(msg, "unwarn")
@@ -778,11 +783,12 @@ async def unwarn_cmd(msg: Message):
             reply_markup=admin_kb
         )
 
-# ========================== КОМАНДА /unban ==========================
+# ========================== /unban ==========================
 @dp.message(Command("unban"))
 async def unban_cmd(msg: Message):
-    if not await check_permission(msg.from_user.id, 5):
-        await msg.answer("⛔ Ваш ранг слишком низок для снятия банов.")
+    # Проверка ранга: только 6 и 7 могут разбанивать
+    if not await check_permission(msg.from_user.id, 6):
+        await msg.answer("⛔ Разбанивать могут только Главный администратор и Создатель (ранг 6+).")
         return
 
     target = await parse_unwarn_unban_command(msg, "unban")
