@@ -3,7 +3,7 @@ import logging
 import secrets
 import string
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 import asyncpg
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
@@ -39,7 +39,10 @@ IGNORED_TOPICS = [TOPICS["admin"], TOPICS["appeals_hublox"]]
 
 db = None
 bot = None
+warning_record_locks = {}  # (chat_id, user_id) -> asyncio.Lock
+ban_target_locks = {}      # user_id -> asyncio.Lock
 
+# ========================== ИНИЦИАЛИЗАЦИЯ БД ==========================
 async def init_db():
     global db
     db = await asyncpg.connect(DATABASE_URL)
@@ -189,39 +192,19 @@ async def can_punish(moderator_id, target_id):
         return False, "⛔ Ваш ранг слишком низок для выдачи наказаний.", mod_level, target_level
     return True, None, mod_level, target_level
 
-# ========================== НОВЫЙ ПАРСИНГ (КАК У ПОДРУГИ) ==========================
+# ========================== ФУНКЦИИ ИЗ КОДА ПОДРУГИ (ДЛЯ ПАРСИНГА И БЛОКИРОВОК) ==========================
 def replied_user(message: Message):
-    """Возвращает пользователя, на чьё сообщение ответили."""
     if message.reply_to_message:
         return message.reply_to_message.from_user
     return None
 
 async def resolve_user(message: Message, args=None):
-    """
-    Определяет пользователя по:
-    1. Ответу (reply)
-    2. Первому аргументу, если он @username или ID
-    3. Если в тексте команды есть упоминание @username (не в аргументах)
-    Возвращает (user_id, username)
-    """
     # 1. Reply
     user = replied_user(message)
     if user:
         return user.id, user.username
 
-    if not args:
-        # Если аргументов нет, пробуем найти упоминание в тексте команды
-        full_text = message.text or ""
-        mentions = re.findall(r'@(\w+)', full_text)
-        if mentions:
-            for username in mentions:
-                try:
-                    chat = await bot.get_chat(f"@{username}")
-                    if chat and chat.type == "private":
-                        return chat.id, chat.username
-                except:
-                    continue
-
+    # 2. Если есть аргументы
     if args:
         token = args[0].strip()
         if token.startswith('@'):
@@ -241,12 +224,83 @@ async def resolve_user(message: Message, args=None):
             except:
                 pass
 
-    # Если не нашли, но есть reply (повторно проверяем на случай, если reply есть, но мы его пропустили)
-    user = replied_user(message)
-    if user:
-        return user.id, user.username
+    # 3. Поиск упоминаний в тексте
+    full_text = message.text or ""
+    mentions = re.findall(r'@(\w+)', full_text)
+    for username in mentions:
+        try:
+            chat = await bot.get_chat(f"@{username}")
+            if chat and chat.type == "private":
+                return chat.id, chat.username
+        except:
+            continue
 
     return None, None
+
+async def get_warn_lock(chat_id, user_id):
+    key = (chat_id, user_id)
+    if key not in warning_record_locks:
+        warning_record_locks[key] = asyncio.Lock()
+    return warning_record_locks[key]
+
+async def get_ban_lock(user_id):
+    if user_id not in ban_target_locks:
+        ban_target_locks[user_id] = asyncio.Lock()
+    return ban_target_locks[user_id]
+
+# ========================== СИСТЕМА ВАРНОВ (ИЗ КОДА ПОДРУГИ) ==========================
+async def issue_warning(chat_id, user_id, target_name, reason, admin_name="Кошатина", admin_id=None, source_message_id=None, thread_id=None):
+    """
+    Единая функция выдачи варна с блокировкой и проверкой бана.
+    Возвращает (выдан_ли_варн, количество_варнов, номер_варна)
+    """
+    lock = await get_warn_lock(chat_id, user_id)
+    async with lock:
+        if await is_banned(user_id):
+            return False, None, None
+
+        current = await get_user_warns(user_id)
+        new_warns, warn_number = await add_warn(user_id, reason, admin_id or bot.id, chat_id, source_message_id)
+
+        # Если достигнут лимит 4 – бан
+        if new_warns >= 4:
+            try:
+                await bot.restrict_chat_member(chat_id, user_id, permissions=ChatPermissions(can_send_messages=False))
+                await db.execute("UPDATE users SET banned=TRUE, ban_until=NULL WHERE user_id=$1", user_id)
+            except Exception as e:
+                logging.error(f"Не удалось забанить пользователя {user_id} при достижении 4/4: {e}")
+
+        return True, new_warns, warn_number
+
+# ========================== СИСТЕМА БАНОВ (ИЗ КОДА ПОДРУГИ) ==========================
+async def apply_ban(chat_id, user_id, reason, moderator_id, source_message_id=None):
+    """Применяет бан в основном чате и записывает в БД."""
+    lock = await get_ban_lock(user_id)
+    async with lock:
+        if await is_banned(user_id):
+            return False, None
+
+        await bot.restrict_chat_member(chat_id, user_id, permissions=ChatPermissions(can_send_messages=False))
+        await db.execute("UPDATE users SET banned=TRUE, ban_until=NULL WHERE user_id=$1", user_id)
+        ban_num = format_number(await get_next_number('ban_counter'))
+        await db.execute(
+            "INSERT INTO ban_logs (user_id, ban_number, reason, moderator_id, chat_id, message_id, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            user_id, ban_num, reason, moderator_id, chat_id, source_message_id, int(datetime.now().timestamp())
+        )
+        return True, ban_num
+
+async def apply_unban(chat_id, user_id, moderator_id):
+    """Снимает бан в основном чате и записывает в БД."""
+    if not await is_banned(user_id):
+        return False, None
+    await bot.restrict_chat_member(chat_id, user_id, permissions=ChatPermissions(can_send_messages=True))
+    await db.execute("UPDATE users SET banned=FALSE, ban_until=NULL WHERE user_id=$1", user_id)
+    unban_num = format_number(await get_next_number('unban_counter'))
+    await db.execute(
+        "INSERT INTO unban_logs (user_id, unban_number, moderator_id, chat_id, message_id, created_at) VALUES ($1, $2, $3, $4, $5, $6)",
+        user_id, unban_num, moderator_id, chat_id, None, int(datetime.now().timestamp())
+    )
+    return True, unban_num
 
 # ========================== ОБНОВЛЕНИЕ СПИСКА АДМИНОВ ==========================
 async def update_admin_list():
@@ -374,7 +428,7 @@ async def upmod_cmd(msg: Message):
         await msg.answer("⛔ Только создатель может повышать.")
         return
 
-    args = msg.text.split()[1:]  # аргументы после команды
+    args = msg.text.split()[1:]
     target_id, target_username = await resolve_user(msg, args)
     if not target_id:
         await msg.answer("⚠️ Используйте команду как ответ на сообщение или укажите @username или ID.")
@@ -510,39 +564,42 @@ async def downmod_cmd(msg: Message):
     await update_admin_list()
     await msg.answer(f"✅ @{target_username or target_id} понижен до уровня {new_level} ({get_role_name(new_level)}).")
 
+# ========================== ФОРМАТ СООБЩЕНИЙ (ТВОЙ) ==========================
 def build_warn_msg(user_mention, warn_count, reason, warn_number):
     levels = ["предупреждение", "мут на 5 минут", "мут на 24 часа", "бан"]
     level_lines = [f" • {i+1}/4 - {levels[i]} {'⚠️' if i+1 == warn_count else ''}" for i in range(4)]
     return f"{user_mention} получает варн ({warn_count}/4)\nПричина: «{reason}»\n— · —\n" + "\n".join(level_lines) + f"\n— · —\nID варна: {warn_number}\n— · —"
 
-# ========================== /warn (исправленный) ==========================
+def build_ban_msg(user_mention, reason, ban_number):
+    return f"{user_mention} получает бан\nПричина: «{reason}»\n— · —\nID бана: {ban_number}\n— · —"
+
+def build_unwarn_msg(user_mention, unwarn_number):
+    return f"С пользователя {user_mention} сняты ограничения (0/4)\n— · —\nНомер снятия: {unwarn_number}"
+
+# ========================== /warn ==========================
 @dp.message(Command("warn"))
 async def warn_cmd(msg: Message):
     if not await check_permission(msg.from_user.id, 4):
         await msg.answer("⛔ Выдавать варны могут только администраторы (ранг 4+).")
         return
 
-    # Разбиваем команду на аргументы
     parts = msg.text.split(maxsplit=1)
     args = parts[1].split() if len(parts) > 1 else []
     reason = ""
     target_id = None
     target_username = None
 
-    # Пытаемся найти цель
     if msg.reply_to_message:
         user = msg.reply_to_message.from_user
         if user:
             target_id = user.id
             target_username = user.username
-            # Причина — всё, что после команды (если есть)
             if args:
                 reason = " ".join(args).strip()
         else:
             await msg.answer("⚠️ Не удалось определить пользователя в ответе.")
             return
     else:
-        # Без reply: первый аргумент — цель, остальное — причина
         if not args:
             await msg.answer("⚠️ Используйте команду с ответом на сообщение или укажите @Username или ID и укажите причину.")
             return
@@ -563,7 +620,7 @@ async def warn_cmd(msg: Message):
         await msg.answer("❌ Нельзя выдать варн самому себе.")
         return
 
-    # Проверка прав
+    # Проверка прав can_punish
     allowed, err_msg, mod_level, target_level = await can_punish(msg.from_user.id, target_id)
     if not allowed:
         hubsup_id = await get_config("hubsup_id")
@@ -587,13 +644,30 @@ async def warn_cmd(msg: Message):
         await msg.answer("⚠️ Пользователь уже забанен.")
         return
 
+    # Выдаём варн через issue_warning
     mid = msg.reply_to_message.message_id if msg.reply_to_message else None
-    warn_count, warn_number = await add_warn(target_id, reason, msg.from_user.id, msg.chat.id, mid)
+    admin_name = f"@{msg.from_user.username}" if msg.from_user.username else "Администратор"
+    issued, warn_count, warn_number = await issue_warning(
+        chat_id=msg.chat.id,
+        user_id=target_id,
+        target_name=target_username or str(target_id),
+        reason=reason,
+        admin_name=admin_name,
+        admin_id=msg.from_user.id,
+        source_message_id=mid,
+        thread_id=msg.message_thread_id
+    )
+
+    if not issued:
+        await msg.answer("⚠️ Не удалось выдать варн (возможно, пользователь уже забанен).")
+        return
+
     mention = f"@{target_username}" if target_username else f"[{target_id}](tg://user?id={target_id})"
     chat_msg = build_warn_msg(mention, warn_count, reason, warn_number)
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Подать аппеляцию", url="https://t.me/duosup_bot")]])
     await msg.reply(chat_msg, parse_mode="Markdown", reply_markup=kb)
 
+    # Отправка в админ-чат
     hubsup = await get_config("hubsup_id")
     if hubsup:
         admin_text = (
@@ -603,7 +677,7 @@ async def warn_cmd(msg: Message):
             f"Пользователь: {mention}\n"
             f"ID: `{target_id}`\n"
             f"Предупреждений: {warn_count}/4\n"
-            f"Кем выдан: @{msg.from_user.username or msg.from_user.first_name}\n"
+            f"Кем выдан: {admin_name}\n"
             f"Чат ID: `{msg.chat.id}`\n"
             f"Время выдачи: {datetime.now().strftime('%H:%M:%S')} по МКС"
         )
@@ -620,11 +694,7 @@ async def warn_cmd(msg: Message):
             reply_markup=admin_kb
         )
 
-    if warn_count >= 4:
-        await bot.restrict_chat_member(msg.chat.id, target_id, permissions=ChatPermissions(can_send_messages=False))
-        await db.execute("UPDATE users SET banned=TRUE, ban_until=NULL WHERE user_id=$1", target_id)
-
-# ========================== /ban (исправленный) ==========================
+# ========================== /ban ==========================
 @dp.message(Command("ban"))
 async def ban_cmd(msg: Message):
     if not await check_permission(msg.from_user.id, 6):
@@ -687,18 +757,14 @@ async def ban_cmd(msg: Message):
         await msg.answer(err_msg)
         return
 
-    if await is_banned(target_id):
+    mid = msg.reply_to_message.message_id if msg.reply_to_message else None
+    success, ban_num = await apply_ban(msg.chat.id, target_id, reason, msg.from_user.id, mid)
+    if not success:
         await msg.answer("⚠️ Пользователь уже забанен.")
         return
 
-    await bot.restrict_chat_member(msg.chat.id, target_id, permissions=ChatPermissions(can_send_messages=False))
-    await db.execute("UPDATE users SET banned=TRUE, ban_until=NULL WHERE user_id=$1", target_id)
-    ban_num = format_number(await get_next_number('ban_counter'))
-    mid = msg.reply_to_message.message_id if msg.reply_to_message else None
-    await db.execute("INSERT INTO ban_logs (user_id, ban_number, reason, moderator_id, chat_id, message_id, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7)",
-                     target_id, ban_num, reason, msg.from_user.id, msg.chat.id, mid, int(datetime.now().timestamp()))
     mention = f"@{target_username}" if target_username else f"[{target_id}](tg://user?id={target_id})"
-    chat_msg = f"{mention} получает бан\nПричина: «{reason}»\n— · —\nID бана: {ban_num}\n— · —"
+    chat_msg = build_ban_msg(mention, reason, ban_num)
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Подать аппеляцию", url="https://t.me/duosup_bot")]])
     await msg.reply(chat_msg, parse_mode="Markdown", reply_markup=kb)
 
@@ -727,7 +793,7 @@ async def ban_cmd(msg: Message):
             reply_markup=admin_kb
         )
 
-# ========================== /unwarn (исправленный) ==========================
+# ========================== /unwarn ==========================
 @dp.message(Command("unwarn"))
 async def unwarn_cmd(msg: Message):
     if not await check_permission(msg.from_user.id, 6):
@@ -766,12 +832,14 @@ async def unwarn_cmd(msg: Message):
         await msg.answer("⚠️ У пользователя нет активных варнов.")
         return
 
+    # Снимаем все варны (по логике подруги, unwarn снимает все варны, а не одно)
     await remove_all_warns(target_id)
     unwarn_num = format_number(await get_next_number('unwarn_counter'))
+    # Запись в лог
     await db.execute("INSERT INTO unwarn_logs (user_id, unwarn_number, moderator_id, chat_id, message_id, created_at) VALUES ($1, $2, $3, $4, $5, $6)",
                      target_id, unwarn_num, msg.from_user.id, msg.chat.id, None, int(datetime.now().timestamp()))
     mention = f"@{target_username}" if target_username else f"[{target_id}](tg://user?id={target_id})"
-    chat_msg = f"С пользователя {mention} сняты ограничения (0/4)\n— · —\nНомер снятия: {unwarn_num}"
+    chat_msg = build_unwarn_msg(mention, unwarn_num)
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Подать аппеляцию", url="https://t.me/duosup_bot")]])
     await msg.reply(chat_msg, parse_mode="Markdown", reply_markup=kb)
 
@@ -794,7 +862,7 @@ async def unwarn_cmd(msg: Message):
             parse_mode="Markdown"
         )
 
-# ========================== /unban (исправленный) ==========================
+# ========================== /unban ==========================
 @dp.message(Command("unban"))
 async def unban_cmd(msg: Message):
     if not await check_permission(msg.from_user.id, 6):
@@ -829,17 +897,13 @@ async def unban_cmd(msg: Message):
         await msg.answer(err_msg)
         return
 
-    if not await is_banned(target_id):
+    success, unban_num = await apply_unban(msg.chat.id, target_id, msg.from_user.id)
+    if not success:
         await msg.answer("⚠️ Пользователь не забанен.")
         return
 
-    await bot.restrict_chat_member(msg.chat.id, target_id, permissions=ChatPermissions(can_send_messages=True))
-    await db.execute("UPDATE users SET banned=FALSE, ban_until=NULL WHERE user_id=$1", target_id)
-    unban_num = format_number(await get_next_number('unban_counter'))
-    await db.execute("INSERT INTO unban_logs (user_id, unban_number, moderator_id, chat_id, message_id, created_at) VALUES ($1, $2, $3, $4, $5, $6)",
-                     target_id, unban_num, msg.from_user.id, msg.chat.id, None, int(datetime.now().timestamp()))
     mention = f"@{target_username}" if target_username else f"[{target_id}](tg://user?id={target_id})"
-    chat_msg = f"С пользователя {mention} сняты ограничения (0/4)\n— · —\nНомер снятия: {unban_num}"
+    chat_msg = build_unwarn_msg(mention, unban_num)  # используем тот же формат
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Подать аппеляцию", url="https://t.me/duosup_bot")]])
     await msg.reply(chat_msg, parse_mode="Markdown", reply_markup=kb)
 
@@ -1018,41 +1082,50 @@ async def handle_links(msg: Message):
     if msg.from_user.id == CREATOR_ID:
         return
     if re.search(r'https?://\S+', msg.text):
-        warn_count, warn_number = await add_warn(msg.from_user.id, "Ссылка", bot.id, msg.chat.id, msg.message_id)
-        mention = f"@{msg.from_user.username}" if msg.from_user.username else f"[{msg.from_user.id}](tg://user?id={msg.from_user.id})"
-        chat_msg = build_warn_msg(mention, warn_count, "Ссылка", warn_number)
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="Подать аппеляцию", url="https://t.me/duosup_bot")]
-        ])
-        await msg.reply(chat_msg, parse_mode="Markdown", reply_markup=kb)
-
-        hubsup = await get_config("hubsup_id")
-        if hubsup:
-            admin_text = (
-                f"**ВЫДАН ВАРН** (автоматически)\n"
-                f"Причина: Ссылка\n"
-                f"ID варна: {warn_number}\n"
-                f"Пользователь: {mention}\n"
-                f"ID: `{msg.from_user.id}`\n"
-                f"Предупреждений: {warn_count}/4\n"
-                f"Кем выдан: бот\n"
-                f"Чат ID: `{msg.chat.id}`\n"
-                f"Время выдачи: {datetime.now().strftime('%H:%M:%S')} по МКС"
-            )
-            admin_kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="Перейти к сообщению", url=f"https://t.me/c/{msg.chat.id}/{msg.message_id}")]
+        # Автоварн через issue_warning
+        issued, warn_count, warn_number = await issue_warning(
+            chat_id=msg.chat.id,
+            user_id=msg.from_user.id,
+            target_name=msg.from_user.username or str(msg.from_user.id),
+            reason="Ссылка",
+            admin_name="Бот",
+            admin_id=bot.id,
+            source_message_id=msg.message_id,
+            thread_id=msg.message_thread_id
+        )
+        if issued:
+            mention = f"@{msg.from_user.username}" if msg.from_user.username else f"[{msg.from_user.id}](tg://user?id={msg.from_user.id})"
+            chat_msg = build_warn_msg(mention, warn_count, "Ссылка", warn_number)
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="Подать аппеляцию", url="https://t.me/duosup_bot")]
             ])
-            await bot.send_message(
-                chat_id=int(hubsup),
-                message_thread_id=TOPICS["mod_chat"],
-                text=admin_text,
-                parse_mode="Markdown",
-                reply_markup=admin_kb
-            )
-        if warn_count >= 4:
-            await bot.restrict_chat_member(msg.chat.id, msg.from_user.id, permissions=ChatPermissions(can_send_messages=False))
-            await db.execute("UPDATE users SET banned=TRUE, ban_until=NULL WHERE user_id=$1", msg.from_user.id)
+            await msg.reply(chat_msg, parse_mode="Markdown", reply_markup=kb)
+
+            hubsup = await get_config("hubsup_id")
+            if hubsup:
+                admin_text = (
+                    f"**ВЫДАН ВАРН** (автоматически)\n"
+                    f"Причина: Ссылка\n"
+                    f"ID варна: {warn_number}\n"
+                    f"Пользователь: {mention}\n"
+                    f"ID: `{msg.from_user.id}`\n"
+                    f"Предупреждений: {warn_count}/4\n"
+                    f"Кем выдан: бот\n"
+                    f"Чат ID: `{msg.chat.id}`\n"
+                    f"Время выдачи: {datetime.now().strftime('%H:%M:%S')} по МКС"
+                )
+                admin_kb = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="Перейти к сообщению", url=f"https://t.me/c/{msg.chat.id}/{msg.message_id}")]
+                ])
+                await bot.send_message(
+                    chat_id=int(hubsup),
+                    message_thread_id=TOPICS["mod_chat"],
+                    text=admin_text,
+                    parse_mode="Markdown",
+                    reply_markup=admin_kb
+                )
         return
+
     if await is_banned(msg.from_user.id):
         await msg.delete()
         await msg.answer("Вы забанены и не можете писать.")
