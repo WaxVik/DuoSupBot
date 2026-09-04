@@ -39,7 +39,6 @@ IGNORED_TOPICS = [TOPICS["admin"], TOPICS["appeals_hublox"]]
 
 db = None
 
-# ========================== ИНИЦИАЛИЗАЦИЯ БАЗЫ ==========================
 async def init_db():
     global db
     db = await asyncpg.connect(DATABASE_URL)
@@ -69,7 +68,6 @@ async def init_db():
     await db.execute("INSERT INTO moderators (user_id, username, level, role) VALUES ($1, $2, 7, 'Создатель') ON CONFLICT (user_id) DO NOTHING",
                      CREATOR_ID, 'WaxVik0')
 
-# ========================== ФУНКЦИИ РАБОТЫ С БД ==========================
 async def get_config(key):
     row = await db.fetchrow("SELECT value FROM config WHERE key=$1", key)
     return row[0] if row else None
@@ -156,7 +154,7 @@ async def is_creator(user_id):
 
 def get_role_name(level):
     roles = {
-        0: "Участник",
+        0: "Участник",  # не показываем в списке администраторов
         1: "Младший модератор",
         2: "Модератор",
         3: "Младший администратор",
@@ -184,12 +182,8 @@ async def can_punish(moderator_id, target_id):
         return False, "⛔ Ваш ранг слишком низок для выдачи наказаний.", mod_level, target_level
     return True, None, mod_level, target_level
 
-# ========================== ИСПРАВЛЕННАЯ ФУНКЦИЯ ПАРСИНГА ==========================
+# ========================== НОВАЯ ФУНКЦИЯ ПАРСИНГА ==========================
 async def parse_warn_ban_command(message: Message, command_type: str):
-    """
-    Возвращает (target_user_id, target_username, reason, message_id_reply) или (None, None, None, None)
-    command_type: 'warn' или 'ban'
-    """
     text = message.text
     cmd = f"/{command_type}"
     if text.startswith(cmd):
@@ -197,7 +191,7 @@ async def parse_warn_ban_command(message: Message, command_type: str):
     else:
         return None, None, None, None
 
-    # 1. Если есть reply – берём автора ответа (самый надёжный способ)
+    # 1. Если есть reply – берём автора ответа
     if message.reply_to_message:
         user = message.reply_to_message.from_user
         if user:
@@ -207,40 +201,27 @@ async def parse_warn_ban_command(message: Message, command_type: str):
             return user.id, user.username, reason, message.reply_to_message.message_id
         return None, None, None, None
 
-    # 2. Ищем упоминания через entities (официальный способ)
-    if message.entities:
-        sender_id = message.from_user.id
-        for entity in message.entities:
-            if entity.type == "mention":
-                # Получаем текст упоминания (например, @username)
-                mention_text = text[entity.offset:entity.offset + entity.length]
-                username = mention_text.replace('@', '')
-                try:
-                    # Пытаемся получить пользователя через API
-                    chat = await bot.get_chat(f"@{username}")
-                    if chat:
-                        # Исключаем упоминание самого отправителя
-                        if chat.id == sender_id:
-                            continue
-                        # Проверяем, что это именно пользователь, а не группа/канал
-                        if chat.type == "private":
-                            # Убираем упоминание из текста, остаётся причина
-                            reason = text.replace(mention_text, "").strip()
-                            if not reason:
-                                return None, None, None, None
-                            return chat.id, chat.username, reason, None
-                except Exception as e:
-                    logging.error(f"Ошибка получения пользователя @{username}: {e}")
-                    continue
-
-    # 3. Если ничего не нашли
+    # 2. Ищем @username через re (первое упоминание)
+    match = re.search(r'@(\w+)', text)
+    if match:
+        username = match.group(1)
+        # Проверяем, не равен ли этот юзернейм текущему пользователю
+        if username.lower() == message.from_user.username.lower():
+            # Если это сам отправитель, возвращаем None, чтобы вызвать ошибку "нельзя самому себе"
+            return None, None, None, None
+        try:
+            chat = await bot.get_chat(f"@{username}")
+            if chat and chat.type == "private":
+                reason = text.replace(f"@{username}", "").strip()
+                if not reason:
+                    return None, None, None, None
+                return chat.id, chat.username, reason, None
+        except Exception as e:
+            logging.error(f"Ошибка получения @{username}: {e}")
+            return None, None, None, None
     return None, None, None, None
 
 async def parse_unwarn_unban_command(message: Message, command_type: str):
-    """
-    Для unwarn/unban: не требуется причина.
-    Возвращает (target_user_id, target_username, message_id_reply) или None
-    """
     text = message.text
     cmd = f"/{command_type}"
     if text.startswith(cmd):
@@ -254,23 +235,22 @@ async def parse_unwarn_unban_command(message: Message, command_type: str):
             return user.id, user.username, message.reply_to_message.message_id
         return None, None, None
 
-    if message.entities:
-        sender_id = message.from_user.id
-        for entity in message.entities:
-            if entity.type == "mention":
-                mention_text = text[entity.offset:entity.offset + entity.length]
-                username = mention_text.replace('@', '')
-                try:
-                    chat = await bot.get_chat(f"@{username}")
-                    if chat and chat.type == "private" and chat.id != sender_id:
-                        return chat.id, chat.username, None
-                except:
-                    continue
+    match = re.search(r'@(\w+)', text)
+    if match:
+        username = match.group(1)
+        if username.lower() == message.from_user.username.lower():
+            return None, None, None
+        try:
+            chat = await bot.get_chat(f"@{username}")
+            if chat and chat.type == "private":
+                return chat.id, chat.username, None
+        except:
+            return None, None, None
     return None, None, None
 
-# ========================== ОБНОВЛЕНИЕ СПИСКА АДМИНИСТРАТОРОВ ==========================
+# ========================== ОБНОВЛЕНИЕ СПИСКА АДМИНИСТРАТОРОВ (без 0) ==========================
 async def update_admin_list():
-    rows = await db.fetch("SELECT user_id, username, level, role FROM moderators ORDER BY level DESC")
+    rows = await db.fetch("SELECT user_id, username, level, role FROM moderators WHERE level > 0 ORDER BY level DESC")
     if not rows:
         text = "👥 Список администраторов пуст."
     else:
@@ -1018,3 +998,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+    
