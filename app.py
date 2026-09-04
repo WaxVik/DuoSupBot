@@ -160,17 +160,21 @@ async def can_punish(moderator_id, target_id, min_level_required):
         return False, "❌ Нельзя применить наказание к создателю."
     return True, None
 
-# ========== ПРОСТАЯ И НАДЁЖНАЯ ФУНКЦИЯ ДЛЯ ПОЛУЧЕНИЯ ЦЕЛИ ==========
+# ========== НОВАЯ ФУНКЦИЯ get_target_user (правильный поиск) ==========
 async def get_target_user(message: Message):
-    # 1. Если есть ответ на сообщение – берём автора ответа (это самый надёжный способ)
+    # 1. Если есть ответ на сообщение – берём автора (это приоритет)
     if message.reply_to_message:
         user = message.reply_to_message.from_user
         if user:
             return user.id, user.username, message.reply_to_message.message_id
         return None
 
-    # 2. Если нет ответа, ищем первое упоминание через entities
+    # 2. Если нет ответа, ищем упоминания через entities
     if message.entities:
+        # Получаем ID отправителя, чтобы исключить его упоминания
+        sender_id = message.from_user.id
+        # Собираем все упоминания
+        mentions = []
         for entity in message.entities:
             if entity.type == "mention":
                 mention_text = message.text[entity.offset:entity.offset + entity.length]
@@ -178,9 +182,15 @@ async def get_target_user(message: Message):
                 try:
                     chat = await bot.get_chat(f"@{username}")
                     if chat:
-                        return chat.id, chat.username, None
+                        # Исключаем упоминание самого отправителя
+                        if chat.id != sender_id:
+                            mentions.append((chat.id, chat.username))
                 except Exception:
-                    continue  # если такого юзера нет, ищем дальше
+                    continue
+        # Если есть подходящие упоминания, берём первое
+        if mentions:
+            user_id, username = mentions[0]
+            return user_id, username, None
 
     # 3. Если ничего не нашли
     return None
@@ -414,49 +424,40 @@ def build_warn_msg(user_mention, warn_count, reason, warn_number):
 
 @dp.message(Command("warn"))
 async def warn_cmd(msg: Message):
-    # Проверка прав (уровень 2+)
     if not await check_permission(msg.from_user.id, 2):
         await msg.answer("⛔ Недостаточно прав (требуется уровень 2+).")
         return
 
-    # Определяем цель
     target = await get_target_user(msg)
     if not target:
         await msg.answer("⚠️ Укажите пользователя: ответьте на сообщение или напишите @username.")
         return
 
     uid, uname, mid = target
-
-    # Создатель не может выдать варн самому себе (но это уже проверяется ниже)
     if uid == msg.from_user.id:
         await msg.answer("❌ Нельзя выдать варн самому себе.")
         return
 
-    # Проверка прав на выдачу варна именно этому пользователю
     allowed, err = await can_punish(msg.from_user.id, uid, 2)
     if not allowed:
         await msg.answer(err)
         return
 
-    # Причина
     reason = msg.text.replace("/warn", "").strip()
     if not reason:
         await msg.answer("⚠️ Укажите причину: /warn причина")
         return
 
-    # Проверка, не забанен ли пользователь
     if await is_banned(uid):
         await msg.answer("⚠️ Пользователь уже забанен.")
         return
 
-    # Выдаём варн
     warn_count, warn_number = await add_warn(uid, reason, msg.from_user.id, msg.chat.id, mid)
     mention = f"@{uname}" if uname else f"[{uid}](tg://user?id={uid})"
     chat_msg = build_warn_msg(mention, warn_count, reason, warn_number)
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Подать аппеляцию", url="https://t.me/duosup_bot")]])
     await msg.reply(chat_msg, parse_mode="Markdown", reply_markup=kb)
 
-    # Отправляем отчёт в админ-чат с кнопкой "Перейти к сообщению"
     hubsup = await get_config("hubsup_id")
     if hubsup:
         admin_text = (
@@ -483,13 +484,12 @@ async def warn_cmd(msg: Message):
             reply_markup=admin_kb
         )
 
-    # Если 4-й варн – бан
     if warn_count >= 4:
         await bot.restrict_chat_member(msg.chat.id, uid, permissions=ChatPermissions(can_send_messages=False))
         await db.execute("UPDATE users SET banned=TRUE, ban_until=NULL WHERE user_id=$1", uid)
 
 # ========================== ОСТАЛЬНЫЕ КОМАНДЫ (без изменений) ==========================
-# ... (ban, unwarn, unban, report, stats, appeal, welcome, links – я их не трогаю, они рабочие)
+# ... (ban, unwarn, unban, report, stats, appeal, welcome, links)
 
 # ========================== ЗАПУСК ==========================
 async def main():
