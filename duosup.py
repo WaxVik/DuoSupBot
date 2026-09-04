@@ -42,6 +42,8 @@ db = None
 
 async def init_db():
     global db
+    if not DATABASE_URL:
+        raise ValueError("DATABASE_URL not set in environment variables!")
     db = await asyncpg.connect(DATABASE_URL)
     await db.execute('''
         CREATE TABLE IF NOT EXISTS config (
@@ -228,38 +230,22 @@ async def is_creator(user_id):
     return user_id == CREATOR_ID
 
 async def check_permission(message, min_level):
-    """Проверка минимального уровня для использования команды"""
     if await is_creator(message.from_user.id):
         return True
     level = await get_moderator_level(message.from_user.id)
     return level >= min_level
 
-# Новая функция проверки, может ли выдающий применить наказание к цели
 async def can_punish(moderator_id, target_id, min_level_required):
-    """
-    Проверяет, может ли модератор (moderator_id) применить наказание к target_id.
-    min_level_required – минимальный уровень модератора для этой команды (2 для warn, 3 для ban и т.д.)
-    Возвращает (разрешено, сообщение_об_ошибке)
-    """
-    # Создатель может всё
     if await is_creator(moderator_id):
         return True, None
-
     mod_level = await get_moderator_level(moderator_id)
     target_level = await get_moderator_level(target_id)
-
-    # Проверка, что у модератора достаточно прав для команды
     if mod_level < min_level_required:
         return False, f"⛔ Недостаточно прав (требуется уровень {min_level_required}+)."
-
-    # Проверка, что цель не выше уровня модератора (или не равна)
     if target_level >= mod_level:
         return False, f"❌ Нельзя применить наказание к пользователю с уровнем {target_level} (выше или равен вашему)."
-
-    # Дополнительно: если цель – создатель (уровень 6), то нельзя никому кроме создателя
     if await is_creator(target_id):
         return False, "❌ Нельзя применить наказание к создателю."
-
     return True, None
 
 async def get_target_user_from_message(message: Message):
@@ -607,7 +593,6 @@ async def downmod_cmd(message: Message):
 # --- /warn ---
 @dp.message(Command("warn"))
 async def warn_cmd(message: Message):
-    # Проверка минимального уровня для команды warn (2)
     if not await check_permission(message, 2):
         await message.answer("⛔ Недостаточно прав (требуется уровень 2+).")
         return
@@ -619,13 +604,10 @@ async def warn_cmd(message: Message):
     if user_id == message.from_user.id:
         await message.answer("❌ Нельзя выдать варн самому себе.")
         return
-
-    # Проверка возможности выдать варн именно этому пользователю
     allowed, err_msg = await can_punish(message.from_user.id, user_id, 2)
     if not allowed:
         await message.answer(err_msg)
         return
-
     reason = message.text.replace("/warn", "").strip()
     if not reason:
         await message.answer("⚠️ Укажите причину: /warn причина")
@@ -669,7 +651,6 @@ async def warn_cmd(message: Message):
         )
     await message.reply(chat_msg, parse_mode="Markdown", reply_markup=keyboard)
 
-    # Отчёт в админ-чат (без кнопки перехода)
     hubsup_id = await get_config("hubsup_id")
     if hubsup_id:
         report = (
@@ -712,12 +693,10 @@ async def ban_cmd(message: Message):
     if user_id == message.from_user.id:
         await message.answer("❌ Нельзя забанить самого себя.")
         return
-
     allowed, err_msg = await can_punish(message.from_user.id, user_id, 3)
     if not allowed:
         await message.answer(err_msg)
         return
-
     reason = message.text.replace("/ban", "").strip()
     if not reason:
         await message.answer("⚠️ Укажите причину: /ban причина")
@@ -788,12 +767,10 @@ async def unwarn_cmd(message: Message):
     if user_id == message.from_user.id:
         await message.answer("❌ Нельзя снять варн с самого себя.")
         return
-
     allowed, err_msg = await can_punish(message.from_user.id, user_id, 4)
     if not allowed:
         await message.answer(err_msg)
         return
-
     warns = await get_user_warns(user_id)
     if warns == 0:
         await message.answer("⚠️ У пользователя нет активных варнов.")
@@ -853,12 +830,10 @@ async def unban_cmd(message: Message):
     if user_id == message.from_user.id:
         await message.answer("❌ Нельзя разбанить самого себя.")
         return
-
     allowed, err_msg = await can_punish(message.from_user.id, user_id, 5)
     if not allowed:
         await message.answer(err_msg)
         return
-
     if not await is_banned(user_id):
         await message.answer("⚠️ Пользователь не забанен.")
         return
@@ -1125,7 +1100,6 @@ async def process_violation(message: Message, text: str, msg_type: str):
     user = message.from_user
     if await is_banned(user.id):
         return
-    # Автоматический варн от бота – не требует проверки уровней
     warn_count, warn_number = await add_warn(user.id, f"Нарушение: {msg_type}", bot.id, message.chat.id, message.message_id)
     user_mention = f"@{user.username}" if user.username else f"[{user.id}](tg://user?id={user.id})"
 
@@ -1189,6 +1163,10 @@ async def process_violation(message: Message, text: str, msg_type: str):
 # ======================= ЗАПУСК =======================
 async def main():
     logging.basicConfig(level=logging.INFO)
+    if not DATABASE_URL:
+        logging.error("❌ DATABASE_URL не задана! Установите переменную окружения DATABASE_URL.")
+        print("❌ DATABASE_URL не задана! Установите переменную окружения DATABASE_URL.")
+        return
     await init_db()
     await update_admin_list()
     print("Duosup запущен!")
