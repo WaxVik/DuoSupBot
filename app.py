@@ -66,7 +66,7 @@ async def init_db():
         await db.execute("INSERT INTO config (key, value) VALUES ($1, $2) ON CONFLICT (key) DO NOTHING", counter, '0')
     for key in ['link_code', 'hublox_id', 'hubsup_id']:
         await db.execute("INSERT INTO config (key, value) VALUES ($1, $2) ON CONFLICT (key) DO NOTHING", key, '')
-    # Создаём запись для создателя с рангом 7, если её нет
+    # Создаём запись для создателя с рангом 7
     await db.execute("INSERT INTO moderators (user_id, username, level, role) VALUES ($1, $2, 7, 'Создатель') ON CONFLICT (user_id) DO NOTHING",
                      CREATOR_ID, 'WaxVik0')
 
@@ -131,11 +131,10 @@ async def is_banned(user_id):
 
 async def get_moderator_level(user_id):
     row = await db.fetchrow("SELECT level FROM moderators WHERE user_id=$1", user_id)
-    return row[0] if row else 0  # по умолчанию 0
+    return row[0] if row else 0
 
 async def set_moderator_level(user_id, level, username=None):
     if level == 0:
-        # удаляем запись
         await db.execute("DELETE FROM moderators WHERE user_id=$1", user_id)
     else:
         role_names = {
@@ -170,41 +169,33 @@ def get_role_name(level):
     return roles.get(level, f"Уровень {level}")
 
 async def check_permission(user_id, min_level):
-    # проверка минимального уровня для команды (для warn/ban/unwarn/unban)
     if await is_creator(user_id):
         return True
     level = await get_moderator_level(user_id)
     return level >= min_level
 
 async def can_punish(moderator_id, target_id):
-    # Проверяет, может ли модератор применить наказание к цели
-    # Возвращает (разрешено, сообщение_об_ошибке, ранг_модератора, ранг_цели)
     mod_level = await get_moderator_level(moderator_id)
     target_level = await get_moderator_level(target_id)
-    # Создатель (7) может всё
     if mod_level == 7:
         return True, None, mod_level, target_level
-    # Модератор не может наказывать равных или вышестоящих
     if target_level >= mod_level:
         return False, f"❌ Вы не можете применить наказание к пользователю с рангом {target_level} (ваш ранг {mod_level}).", mod_level, target_level
-    # Если уровень модератора меньше 1, он не может никого наказывать
     if mod_level < 1:
         return False, "⛔ Ваш ранг слишком низок для выдачи наказаний.", mod_level, target_level
     return True, None, mod_level, target_level
 
-# ========================== ФУНКЦИЯ ДЛЯ ОТПРАВКИ РЕПОРТА ==========================
 async def send_report_to_admin(chat_id, topic_id, text):
     if chat_id and topic_id:
         await bot.send_message(chat_id=chat_id, message_thread_id=topic_id, text=text, parse_mode="Markdown")
 
-# ========================== ПАРСИНГ КОМАНД ==========================
+# ========================== ИСПРАВЛЕННАЯ ФУНКЦИЯ ПАРСИНГА ==========================
 async def parse_warn_ban_command(message: Message, command_type: str):
     """
     Возвращает (target_user_id, target_username, reason, message_id_reply) или (None, None, None, None)
     command_type: 'warn' или 'ban'
     """
     text = message.text
-    # Удаляем команду из текста
     cmd = f"/{command_type}"
     if text.startswith(cmd):
         text = text[len(cmd):].strip()
@@ -215,9 +206,9 @@ async def parse_warn_ban_command(message: Message, command_type: str):
     if message.reply_to_message:
         user = message.reply_to_message.from_user
         if user:
-            reason = text  # весь остаток текста
+            reason = text
             if not reason:
-                return None, None, None, None  # нет причины
+                return None, None, None, None
             return user.id, user.username, reason, message.reply_to_message.message_id
         else:
             return None, None, None, None
@@ -226,15 +217,19 @@ async def parse_warn_ban_command(message: Message, command_type: str):
     match = re.search(r'@(\w+)', text)
     if match:
         username = match.group(1)
-        # Удаляем упоминание из текста, остаётся причина
         reason = text.replace(f"@{username}", "").strip()
         if not reason:
-            return None, None, None, None  # причина отсутствует
+            return None, None, None, None
         try:
             chat = await bot.get_chat(f"@{username}")
-            if chat:
+            if chat and chat.type == "private":
+                if chat.id == message.from_user.id:
+                    return None, None, None, None
                 return chat.id, chat.username, reason, None
-        except:
+            else:
+                return None, None, None, None
+        except Exception as e:
+            logging.error(f"Ошибка получения пользователя @{username}: {e}")
             return None, None, None, None
     return None, None, None, None
 
@@ -261,7 +256,7 @@ async def parse_unwarn_unban_command(message: Message, command_type: str):
         username = match.group(1)
         try:
             chat = await bot.get_chat(f"@{username}")
-            if chat:
+            if chat and chat.type == "private":
                 return chat.id, chat.username, None
         except:
             return None, None, None
@@ -292,7 +287,6 @@ async def update_admin_list():
             sent = await bot.send_message(chat_id=int(cid), message_thread_id=topic, text=text, parse_mode="Markdown")
             await set_config(f"adminlist_msg_{chat_key}", str(sent.message_id))
 
-# ========================== FSM ==========================
 class AppealState(StatesGroup):
     waiting_text = State()
 
@@ -393,7 +387,6 @@ async def upmod_cmd(msg: Message):
     if not await is_creator(msg.from_user.id):
         await msg.answer("⛔ Только создатель может повышать.")
         return
-    # ищем цель
     target = await parse_unwarn_unban_command(msg, "upmod")
     if not target:
         await msg.answer("⚠️ Используйте команду как ответ на сообщение или укажите @username.")
@@ -407,14 +400,10 @@ async def upmod_cmd(msg: Message):
         await msg.answer("❌ Пользователь уже на максимальном уровне (7).")
         return
     new_level = current_level + 1
-    # обновляем уровень
     await set_moderator_level(uid, new_level, uname)
-    # также назначаем права администратора в обоих чатах (если нужно)
     hublox = await get_config("hublox_id")
     hubsup = await get_config("hubsup_id")
-    # назначаем права только если новый уровень > 0
     if hublox and new_level > 0:
-        # права: удалять, банить, читать
         await bot.promote_chat_member(
             chat_id=int(hublox), user_id=uid,
             can_delete_messages=True, can_restrict_members=True,
@@ -457,14 +446,11 @@ async def downmod_cmd(msg: Message):
         await msg.answer("⚠️ Пользователь уже имеет уровень 0 (участник).")
         return
     new_level = current_level - 1
-    # обновляем уровень
     await set_moderator_level(uid, new_level, uname)
-    # снимаем права администратора, если новый уровень 0
     hublox = await get_config("hublox_id")
     hubsup = await get_config("hubsup_id")
     if hublox:
         if new_level == 0:
-            # снимаем права
             await bot.promote_chat_member(
                 chat_id=int(hublox), user_id=uid,
                 can_delete_messages=False, can_restrict_members=False,
@@ -476,7 +462,6 @@ async def downmod_cmd(msg: Message):
                 custom_title=""
             )
         else:
-            # обновляем тег
             await bot.promote_chat_member(
                 chat_id=int(hublox), user_id=uid,
                 can_delete_messages=True, can_restrict_members=True,
@@ -513,10 +498,15 @@ async def downmod_cmd(msg: Message):
     await msg.answer(f"✅ @{uname} понижен до уровня {new_level} ({get_role_name(new_level)}).")
     await update_admin_list()
 
+# ========================== build_warn_msg ==========================
+def build_warn_msg(user_mention, warn_count, reason, warn_number):
+    levels = ["предупреждение", "мут на 5 минут", "мут на 24 часа", "бан"]
+    level_lines = [f" • {i+1}/4 - {levels[i]} {'⚠️' if i+1 == warn_count else ''}" for i in range(4)]
+    return f"{user_mention} получает варн ({warn_count}/4)\nПричина: «{reason}»\n— · —\n" + "\n".join(level_lines) + f"\n— · —\nID варна: {warn_number}\n— · —"
+
 # ========================== /warn ==========================
 @dp.message(Command("warn"))
 async def warn_cmd(msg: Message):
-    # Проверка прав: разрешено всем с уровнем >=1
     if not await check_permission(msg.from_user.id, 1):
         await msg.answer("⛔ Ваш ранг слишком низок для выдачи варнов.")
         return
@@ -533,10 +523,8 @@ async def warn_cmd(msg: Message):
         await msg.answer("❌ Нельзя выдать варн самому себе.")
         return
 
-    # Проверяем, можно ли наказывать
     allowed, err_msg, mod_level, target_level = await can_punish(msg.from_user.id, target_id)
     if not allowed:
-        # Отправляем репорт в тему Reports
         hubsup_id = await get_config("hubsup_id")
         if hubsup_id:
             report_text = (
@@ -554,19 +542,16 @@ async def warn_cmd(msg: Message):
         await msg.answer(err_msg)
         return
 
-    # Проверка, не забанен ли пользователь
     if await is_banned(target_id):
         await msg.answer("⚠️ Пользователь уже забанен.")
         return
 
-    # Выдаём варн
     warn_count, warn_number = await add_warn(target_id, reason, msg.from_user.id, msg.chat.id, mid)
     mention = f"@{target_username}" if target_username else f"[{target_id}](tg://user?id={target_id})"
     chat_msg = build_warn_msg(mention, warn_count, reason, warn_number)
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Подать аппеляцию", url="https://t.me/duosup_bot")]])
     await msg.reply(chat_msg, parse_mode="Markdown", reply_markup=kb)
 
-    # Отчёт в админ-чат
     hubsup = await get_config("hubsup_id")
     if hubsup:
         admin_text = (
@@ -596,11 +581,6 @@ async def warn_cmd(msg: Message):
     if warn_count >= 4:
         await bot.restrict_chat_member(msg.chat.id, target_id, permissions=ChatPermissions(can_send_messages=False))
         await db.execute("UPDATE users SET banned=TRUE, ban_until=NULL WHERE user_id=$1", target_id)
-
-def build_warn_msg(user_mention, warn_count, reason, warn_number):
-    levels = ["предупреждение", "мут на 5 минут", "мут на 24 часа", "бан"]
-    level_lines = [f" • {i+1}/4 - {levels[i]} {'⚠️' if i+1 == warn_count else ''}" for i in range(4)]
-    return f"{user_mention} получает варн ({warn_count}/4)\nПричина: «{reason}»\n— · —\n" + "\n".join(level_lines) + f"\n— · —\nID варна: {warn_number}\n— · —"
 
 # ========================== /ban ==========================
 @dp.message(Command("ban"))
