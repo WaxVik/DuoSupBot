@@ -17,7 +17,9 @@ from aiogram.fsm.storage.memory import MemoryStorage
 # ======================= НАСТРОЙКИ =======================
 BOT_TOKEN = "8970388836:AAH0cFseraGhVRMRb1WB0_gh-PzbjjVhYJA"
 CREATOR_ID = 7675985792
-DATABASE_URL = os.environ.get("DATABASE_URL")
+
+# Жёстко задаём строку подключения (пароль из скриншота)
+DATABASE_URL = "postgresql://postgres:kPDbfTTuTEvoTeOcitibgddkpMAKWUKH@postgres.railway.internal:5432/postgres"
 
 # ======================= ID ТЕМ =======================
 TOPIC_MOD_CHAT = 6
@@ -42,8 +44,6 @@ db = None
 
 async def init_db():
     global db
-    if not DATABASE_URL:
-        raise ValueError("DATABASE_URL not set in environment variables!")
     db = await asyncpg.connect(DATABASE_URL)
     await db.execute('''
         CREATE TABLE IF NOT EXISTS config (
@@ -1163,10 +1163,6 @@ async def process_violation(message: Message, text: str, msg_type: str):
 # ======================= ЗАПУСК =======================
 async def main():
     logging.basicConfig(level=logging.INFO)
-    if not DATABASE_URL:
-        logging.error("❌ DATABASE_URL не задана! Установите переменную окружения DATABASE_URL.")
-        print("❌ DATABASE_URL не задана! Установите переменную окружения DATABASE_URL.")
-        return
     await init_db()
     await update_admin_list()
     print("Duosup запущен!")
