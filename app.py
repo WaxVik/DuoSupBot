@@ -3,12 +3,19 @@ import logging
 import secrets
 import string
 import re
-from datetime import datetime, timedelta
+from datetime import datetime
 import asyncpg
 
-from aiogram import Bot, Dispatcher, types, F
+from aiogram import Bot, Dispatcher, F
 from aiogram.filters import Command
-from aiogram.types import Message, ChatPermissions, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, ContentType
+from aiogram.types import (
+    Message,
+    ChatPermissions,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    CallbackQuery,
+    ContentType,
+)
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -35,123 +42,32 @@ TOPIC_TRADES = 8
 IGNORED_TOPICS = [TOPIC_ADMIN, TOPIC_APPEALS_HUBBLOX]
 
 # ======================= БАЗА ДАННЫХ =======================
-db = None
+db: asyncpg.Pool = None
 
 async def init_db():
     global db
-    db = await asyncpg.connect(DATABASE_URL)
-    await db.execute('''
-        CREATE TABLE IF NOT EXISTS config (
-            key TEXT PRIMARY KEY,
-            value TEXT
-        )
-    ''')
-    await db.execute('''
-        CREATE TABLE IF NOT EXISTS users (
-            user_id BIGINT PRIMARY KEY,
-            warns INTEGER DEFAULT 0,
-            banned BOOLEAN DEFAULT FALSE,
-            ban_until BIGINT
-        )
-    ''')
-    await db.execute('''
-        CREATE TABLE IF NOT EXISTS warn_logs (
-            id SERIAL PRIMARY KEY,
-            user_id BIGINT,
-            warn_number TEXT,
-            reason TEXT,
-            moderator_id BIGINT,
-            chat_id BIGINT,
-            message_id BIGINT,
-            created_at BIGINT,
-            is_active BOOLEAN DEFAULT TRUE
-        )
-    ''')
-    await db.execute('''
-        CREATE TABLE IF NOT EXISTS ban_logs (
-            id SERIAL PRIMARY KEY,
-            user_id BIGINT,
-            ban_number TEXT,
-            reason TEXT,
-            moderator_id BIGINT,
-            chat_id BIGINT,
-            message_id BIGINT,
-            created_at BIGINT
-        )
-    ''')
-    await db.execute('''
-        CREATE TABLE IF NOT EXISTS unban_logs (
-            id SERIAL PRIMARY KEY,
-            user_id BIGINT,
-            unban_number TEXT,
-            moderator_id BIGINT,
-            chat_id BIGINT,
-            message_id BIGINT,
-            created_at BIGINT
-        )
-    ''')
-    await db.execute('''
-        CREATE TABLE IF NOT EXISTS unwarn_logs (
-            id SERIAL PRIMARY KEY,
-            user_id BIGINT,
-            unwarn_number TEXT,
-            moderator_id BIGINT,
-            chat_id BIGINT,
-            message_id BIGINT,
-            created_at BIGINT
-        )
-    ''')
-    await db.execute('''
-        CREATE TABLE IF NOT EXISTS rules (
-            version TEXT PRIMARY KEY,
-            rule_text TEXT,
-            created_at BIGINT
-        )
-    ''')
-    await db.execute('''
-        CREATE TABLE IF NOT EXISTS appeals (
-            id SERIAL PRIMARY KEY,
-            appeal_number TEXT,
-            user_id BIGINT,
-            username TEXT,
-            violation_number TEXT,
-            appeal_text TEXT,
-            created_at BIGINT,
-            status TEXT DEFAULT 'pending'
-        )
-    ''')
-    await db.execute('''
-        CREATE TABLE IF NOT EXISTS appeal_blocks (
-            user_id BIGINT PRIMARY KEY,
-            block_until BIGINT
-        )
-    ''')
-    await db.execute('''
-        CREATE TABLE IF NOT EXISTS moderators (
-            user_id BIGINT PRIMARY KEY,
-            username TEXT,
-            level INTEGER DEFAULT 1,
-            role TEXT
-        )
-    ''')
-    await db.execute('''
-        CREATE TABLE IF NOT EXISTS templates (
-            key TEXT PRIMARY KEY,
-            value TEXT
-        )
-    ''')
-    # Инициализация
-    await db.execute("INSERT INTO templates (key, value) VALUES ($1, $2) ON CONFLICT (key) DO NOTHING",
-                     'welcome_template', '{user}\nДобро пожаловать в HuBBlox\nПожалуйста ознакомтесь с правилами сообщества.')
-    await db.execute("INSERT INTO templates (key, value) VALUES ($1, $2) ON CONFLICT (key) DO NOTHING",
-                     'rules_version', '1.0')
-    for counter in ['warn_counter', 'ban_counter', 'unban_counter', 'unwarn_counter', 'appeal_counter', 'report_counter']:
-        await db.execute("INSERT INTO config (key, value) VALUES ($1, $2) ON CONFLICT (key) DO NOTHING", counter, '0')
-    await db.execute("INSERT INTO config (key, value) VALUES ($1, $2) ON CONFLICT (key) DO NOTHING", 'link_code', '')
-    await db.execute("INSERT INTO config (key, value) VALUES ($1, $2) ON CONFLICT (key) DO NOTHING", 'hublox_id', '')
-    await db.execute("INSERT INTO config (key, value) VALUES ($1, $2) ON CONFLICT (key) DO NOTHING", 'hubsup_id', '')
-    await db.execute("CREATE INDEX IF NOT EXISTS idx_warn_logs_user_id ON warn_logs (user_id)")
-    await db.execute("CREATE INDEX IF NOT EXISTS idx_warn_logs_active ON warn_logs (is_active)")
+    db = await asyncpg.create_pool(DATABASE_URL)
+    async with db.acquire() as conn:
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value TEXT);
+            CREATE TABLE IF NOT EXISTS users (user_id BIGINT PRIMARY KEY, warns INT DEFAULT 0, banned BOOL DEFAULT FALSE, ban_until BIGINT);
+            CREATE TABLE IF NOT EXISTS warn_logs (id SERIAL PRIMARY KEY, user_id BIGINT, warn_number TEXT, reason TEXT, moderator_id BIGINT, chat_id BIGINT, message_id BIGINT, created_at BIGINT, is_active BOOL DEFAULT TRUE);
+            CREATE TABLE IF NOT EXISTS ban_logs (id SERIAL PRIMARY KEY, user_id BIGINT, ban_number TEXT, reason TEXT, moderator_id BIGINT, chat_id BIGINT, message_id BIGINT, created_at BIGINT);
+            CREATE TABLE IF NOT EXISTS unban_logs (id SERIAL PRIMARY KEY, user_id BIGINT, unban_number TEXT, moderator_id BIGINT, chat_id BIGINT, message_id BIGINT, created_at BIGINT);
+            CREATE TABLE IF NOT EXISTS unwarn_logs (id SERIAL PRIMARY KEY, user_id BIGINT, unwarn_number TEXT, moderator_id BIGINT, chat_id BIGINT, message_id BIGINT, created_at BIGINT);
+            CREATE TABLE IF NOT EXISTS rules (version TEXT PRIMARY KEY, rule_text TEXT, created_at BIGINT);
+            CREATE TABLE IF NOT EXISTS appeals (id SERIAL PRIMARY KEY, appeal_number TEXT, user_id BIGINT, username TEXT, violation_number TEXT, appeal_text TEXT, created_at BIGINT, status TEXT DEFAULT 'pending');
+            CREATE TABLE IF NOT EXISTS appeal_blocks (user_id BIGINT PRIMARY KEY, block_until BIGINT);
+            CREATE TABLE IF NOT EXISTS moderators (user_id BIGINT PRIMARY KEY, username TEXT, level INT DEFAULT 1, role TEXT);
+            CREATE TABLE IF NOT EXISTS templates (key TEXT PRIMARY KEY, value TEXT);
+        ''')
+        await conn.execute("INSERT INTO templates (key, value) VALUES ($1, $2) ON CONFLICT (key) DO NOTHING", 'welcome_template', '{user}\nДобро пожаловать в HuBBlox\nПожалуйста ознакомтесь с правилами сообщества.')
+        await conn.execute("INSERT INTO templates (key, value) VALUES ($1, $2) ON CONFLICT (key) DO NOTHING", 'rules_version', '1.0')
+        for counter in ['warn_counter', 'ban_counter', 'unban_counter', 'unwarn_counter', 'appeal_counter', 'report_counter']:
+            await conn.execute("INSERT INTO config (key, value) VALUES ($1, $2) ON CONFLICT (key) DO NOTHING", counter, '0')
+        await conn.execute("INSERT INTO config (key, value) VALUES ($1, $2) ON CONFLICT (key) DO NOTHING", 'link_code', '')
+        await conn.execute("INSERT INTO config (key, value) VALUES ($1, $2) ON CONFLICT (key) DO NOTHING", 'hublox_id', '')
+        await conn.execute("INSERT INTO config (key, value) VALUES ($1, $2) ON CONFLICT (key) DO NOTHING", 'hubsup_id', '')
 
 # ======================= ФУНКЦИИ =======================
 async def get_config(key):
@@ -159,7 +75,7 @@ async def get_config(key):
     return row[0] if row else None
 
 async def set_config(key, value):
-    await db.execute("UPDATE config SET value=$1 WHERE key=$2", value, key)
+    await db.execute("UPDATE config SET value=$1 WHERE key=$2", str(value), key)
 
 async def get_template(key):
     row = await db.fetchrow("SELECT value FROM templates WHERE key=$1", key)
@@ -169,32 +85,46 @@ async def set_template(key, value):
     await db.execute("UPDATE templates SET value=$1 WHERE key=$2", value, key)
 
 async def get_next_number(counter_name):
-    row = await db.fetchrow("SELECT value FROM config WHERE key=$1", counter_name)
-    if row:
-        current = int(row[0])
-        new = current + 1
-        await db.execute("UPDATE config SET value=$1 WHERE key=$2", str(new), counter_name)
-    else:
-        new = 1
-        await db.execute("INSERT INTO config (key, value) VALUES ($1, $2)", counter_name, str(new))
-    return new
+    async with db.acquire() as conn:
+        row = await conn.fetchrow("SELECT value FROM config WHERE key=$1", counter_name)
+        if row:
+            new = int(row[0]) + 1
+            await conn.execute("UPDATE config SET value=$1 WHERE key=$2", str(new), counter_name)
+            return new
+        await conn.execute("INSERT INTO config (key, value) VALUES ($1, $2)", counter_name, '1')
+        return 1
 
 def format_number(num):
     return f"#-{num:05d}"
+
+def get_message_url(chat_id: int, message_id: int) -> str:
+    chat_str = str(chat_id)
+    if chat_str.startswith("-100"):
+        clean_id = chat_str[4:]
+    elif chat_str.startswith("-"):
+        clean_id = chat_str[1:]
+    else:
+        clean_id = chat_str
+    return f"https://t.me/c/{clean_id}/{message_id}"
 
 async def get_user_warns(user_id):
     row = await db.fetchrow("SELECT warns FROM users WHERE user_id=$1", user_id)
     return row[0] if row else 0
 
 async def add_warn(user_id, reason, moderator_id, chat_id, message_id=None):
-    current = await get_user_warns(user_id)
     warn_id = await get_next_number('warn_counter')
     warn_number = format_number(warn_id)
-    if current == 0:
-        await db.execute("INSERT INTO users (user_id, warns) VALUES ($1, 1)", user_id)
-    else:
-        await db.execute("UPDATE users SET warns = warns + 1 WHERE user_id=$1", user_id)
-    new_warns = current + 1
+    
+    row = await db.fetchrow(
+        """
+        INSERT INTO users (user_id, warns) VALUES ($1, 1)
+        ON CONFLICT (user_id) DO UPDATE SET warns = users.warns + 1
+        RETURNING warns;
+        """,
+        user_id
+    )
+    new_warns = row[0]
+    
     await db.execute(
         "INSERT INTO warn_logs (user_id, warn_number, reason, moderator_id, chat_id, message_id, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7)",
         user_id, warn_number, reason, moderator_id, chat_id, message_id, int(datetime.now().timestamp())
@@ -224,7 +154,7 @@ async def get_moderator_level(user_id):
 async def is_creator(user_id):
     return user_id == CREATOR_ID
 
-async def check_permission(message, min_level):
+async def check_permission(message: Message, min_level: int):
     if await is_creator(message.from_user.id):
         return True
     level = await get_moderator_level(message.from_user.id)
@@ -244,49 +174,27 @@ async def can_punish(moderator_id, target_id, min_level_required):
     return True, None
 
 async def get_target_user_from_message(message: Message):
-    if message.reply_to_message:
+    if message.reply_to_message and message.reply_to_message.from_user:
         user = message.reply_to_message.from_user
-        if user:
-            return user.id, user.username, message.reply_to_message.message_id
-        return None
-    text = message.text
+        return user.id, user.username, message.reply_to_message.message_id
+    
+    text = message.text or ""
     match = re.search(r'@(\w+)', text)
     if match:
         username = match.group(1)
+        row = await db.fetchrow("SELECT user_id, username FROM moderators WHERE LOWER(username)=LOWER($1)", username)
+        if row:
+            return row[0], row[1], None
         try:
             chat = await bot.get_chat(f"@{username}")
             if chat:
                 return chat.id, chat.username, None
-        except:
-            return None
+        except Exception:
+            pass
     return None
-
-async def get_current_rules():
-    row = await db.fetchrow("SELECT version, rule_text FROM rules ORDER BY created_at DESC LIMIT 1")
-    return row[0], row[1] if row else None
 
 async def update_rules(version, text):
     await db.execute("INSERT INTO rules (version, rule_text, created_at) VALUES ($1, $2, $3)", version, text, int(datetime.now().timestamp()))
-
-async def get_next_appeal_number():
-    num = await get_next_number('appeal_counter')
-    return format_number(num)
-
-async def get_next_unban_number():
-    num = await get_next_number('unban_counter')
-    return format_number(num)
-
-async def get_next_unwarn_number():
-    num = await get_next_number('unwarn_counter')
-    return format_number(num)
-
-async def get_next_ban_number():
-    num = await get_next_number('ban_counter')
-    return format_number(num)
-
-async def get_next_report_number():
-    num = await get_next_number('report_counter')
-    return format_number(num)
 
 def get_role_name(level):
     roles = {
@@ -312,12 +220,17 @@ async def set_admin_rights(chat_id, user_id, is_admin=True, custom_title=None):
                 can_promote_members=False,
                 can_manage_topics=False,
                 can_manage_video_chats=False,
-                can_manage_chat=False,
-                can_post_stories=False,
-                can_edit_stories=False,
-                can_delete_stories=False,
-                custom_title=custom_title
+                can_manage_chat=False
             )
+            if custom_title:
+                try:
+                    await bot.set_chat_administrator_custom_title(
+                        chat_id=chat_id,
+                        user_id=user_id,
+                        custom_title=custom_title[:16]
+                    )
+                except Exception as title_err:
+                    logging.warning(f"Ошибка при установке плашки администратора: {title_err}")
         else:
             await bot.promote_chat_member(
                 chat_id=chat_id,
@@ -330,11 +243,7 @@ async def set_admin_rights(chat_id, user_id, is_admin=True, custom_title=None):
                 can_promote_members=False,
                 can_manage_topics=False,
                 can_manage_video_chats=False,
-                can_manage_chat=False,
-                can_post_stories=False,
-                can_edit_stories=False,
-                can_delete_stories=False,
-                custom_title=""
+                can_manage_chat=False
             )
         return True
     except Exception as e:
@@ -343,17 +252,18 @@ async def set_admin_rights(chat_id, user_id, is_admin=True, custom_title=None):
 
 async def update_admin_list():
     rows = await db.fetch("SELECT user_id, username, level, role FROM moderators ORDER BY level DESC")
-    if not rows:
-        text = "👥 Список администраторов пуст."
-    else:
-        lines = []
+    bot_me = await bot.get_me()
+    bot_username = bot_me.username or "bot"
+    
+    lines = []
+    if rows:
         for row in rows:
             user_id, username, level, role = row
             mention = f"@{username}" if username else f"[{user_id}](tg://user?id={user_id})"
             role_text = role if role else get_role_name(level)
             lines.append(f"{mention} — {role_text}")
-        lines.append(f"@{bot.username} — Создатель (владелец)")
-        text = "👥 **Состав администрации:**\n" + "\n".join(lines)
+    lines.append(f"@{bot_username} — Создатель (владелец)")
+    text = "👥 **Состав администрации:**\n" + "\n".join(lines)
 
     hubsup_id = await get_config("hubsup_id")
     if hubsup_id:
@@ -361,15 +271,13 @@ async def update_admin_list():
         if old_msg_id:
             try:
                 await bot.delete_message(chat_id=int(hubsup_id), message_id=int(old_msg_id))
-            except:
+            except Exception:
                 pass
-        sent = await bot.send_message(
-            chat_id=int(hubsup_id),
-            message_thread_id=TOPIC_MODLIST,
-            text=text,
-            parse_mode="Markdown"
-        )
-        await set_config("adminlist_msg_hubsup", str(sent.message_id))
+        try:
+            sent = await bot.send_message(chat_id=int(hubsup_id), message_thread_id=TOPIC_MODLIST, text=text, parse_mode="Markdown")
+            await set_config("adminlist_msg_hubsup", str(sent.message_id))
+        except Exception as e:
+            logging.error(f"Не удалось отправить список админов в HubSup: {e}")
 
     hublox_id = await get_config("hublox_id")
     if hublox_id:
@@ -377,15 +285,13 @@ async def update_admin_list():
         if old_msg_id:
             try:
                 await bot.delete_message(chat_id=int(hublox_id), message_id=int(old_msg_id))
-            except:
+            except Exception:
                 pass
-        sent = await bot.send_message(
-            chat_id=int(hublox_id),
-            message_thread_id=TOPIC_ADMIN,
-            text=text,
-            parse_mode="Markdown"
-        )
-        await set_config("adminlist_msg_hublox", str(sent.message_id))
+        try:
+            sent = await bot.send_message(chat_id=int(hublox_id), message_thread_id=TOPIC_ADMIN, text=text, parse_mode="Markdown")
+            await set_config("adminlist_msg_hublox", str(sent.message_id))
+        except Exception as e:
+            logging.error(f"Не удалось отправить список админов в HuBBlox: {e}")
 
 # ======================= КЛАССЫ FSM =======================
 class AppealStates(StatesGroup):
@@ -456,10 +362,7 @@ async def link_hubsup(message: Message):
     await message.answer("✅ Административный чат связан с HuBBlox!")
     hublox_id = await get_config("hublox_id")
     if hublox_id:
-        await bot.send_message(
-            chat_id=int(hublox_id),
-            text="🔗 **Административный чат связан!**\nБот работает в обоих чатах."
-        )
+        await bot.send_message(chat_id=int(hublox_id), text="🔗 **Административный чат связан!**\nБот работает в обоих чатах.")
     await update_admin_list()
 
 @dp.message(Command("redactrule"))
@@ -469,28 +372,25 @@ async def redact_rule(message: Message, state: FSMContext):
         return
     text = message.text.replace("/redactrule", "").strip()
     if text:
-        current_version = await get_template('rules_version')
-        major, minor = map(int, current_version.split('.'))
-        minor += 1
-        new_version = f"{major}.{minor}"
+        current_version = await get_template('rules_version') or "1.0"
+        try:
+            major, minor = map(int, current_version.split('.'))
+            minor += 1
+            new_version = f"{major}.{minor}"
+        except Exception:
+            new_version = "1.1"
+            
         await set_template('rules_version', new_version)
         await update_rules(new_version, text)
         hublox_id = await get_config("hublox_id")
         if hublox_id:
-            await bot.send_message(
-                chat_id=int(hublox_id),
-                message_thread_id=TOPIC_RULES,
-                text=f"📜 **Правила сообщества HuBBlox (v{new_version})**\n\n{text}",
-                parse_mode="Markdown"
-            )
+            await bot.send_message(chat_id=int(hublox_id), message_thread_id=TOPIC_RULES, text=f"📜 **Правила сообщества HuBBlox (v{new_version})**\n\n{text}", parse_mode="Markdown")
             for topic in [TOPIC_CHAT, TOPIC_TRADES, TOPIC_RAIDS, TOPIC_ANNOUNCEMENTS]:
                 if topic:
-                    await bot.send_message(
-                        chat_id=int(hublox_id),
-                        message_thread_id=topic,
-                        text=f"🔔 **Обновление правил!**\nВерсия {new_version}. Ознакомьтесь в теме «Правила».",
-                        parse_mode="Markdown"
-                    )
+                    try:
+                        await bot.send_message(chat_id=int(hublox_id), message_thread_id=topic, text=f"🔔 **Обновление правил!**\nВерсия {new_version}. Ознакомьтесь в теме «Правила».", parse_mode="Markdown")
+                    except Exception as e:
+                        logging.error(f"Ошибка при рассылке обновления правил: {e}")
         await message.answer(f"✅ Правила обновлены до версии {new_version}!")
     else:
         await message.answer("📝 Введите новые правила (полный текст):")
@@ -521,11 +421,10 @@ async def upmod_cmd(message: Message):
             await message.answer("❌ Пользователь уже на максимальном уровне (Главный администратор).")
             return
         new_level = current_level + 1
-        await db.execute("UPDATE moderators SET level=$1, role=$2 WHERE user_id=$3", new_level, get_role_name(new_level), user_id)
+        await db.execute("UPDATE moderators SET level=$1, role=$2, username=$3 WHERE user_id=$4", new_level, get_role_name(new_level), username, user_id)
     else:
         new_level = 1
-        await db.execute("INSERT INTO moderators (user_id, username, level, role) VALUES ($1, $2, $3, $4)",
-                         user_id, username, new_level, get_role_name(new_level))
+        await db.execute("INSERT INTO moderators (user_id, username, level, role) VALUES ($1, $2, $3, $4)", user_id, username, new_level, get_role_name(new_level))
     role_title = get_role_name(new_level)
     hublox_id = await get_config("hublox_id")
     hubsup_id = await get_config("hubsup_id")
@@ -533,7 +432,7 @@ async def upmod_cmd(message: Message):
         await set_admin_rights(int(hublox_id), user_id, is_admin=True, custom_title=role_title)
     if hubsup_id:
         await set_admin_rights(int(hubsup_id), user_id, is_admin=True, custom_title=role_title)
-    await message.answer(f"✅ @{username} повышен до уровня {new_level} ({role_title}) и получил права администратора с тегом «{role_title}».")
+    await message.answer(f"✅ @{username or user_id} повышен до уровня {new_level} ({role_title}) и получил права администратора с тегом «{role_title}».")
     await update_admin_list()
 
 @dp.message(Command("downmod"))
@@ -554,12 +453,11 @@ async def downmod_cmd(message: Message):
         await message.answer("⚠️ Пользователь не является модератором.")
         return
     current_level = row[0]
-    if current_level == 0:
+    if current_level <= 0:
         await message.answer("⚠️ Пользователь уже имеет уровень 0 (участник).")
         return
     new_level = current_level - 1
     if new_level == 0:
-        # Удаляем из модераторов
         await db.execute("DELETE FROM moderators WHERE user_id=$1", user_id)
         hublox_id = await get_config("hublox_id")
         hubsup_id = await get_config("hubsup_id")
@@ -567,17 +465,17 @@ async def downmod_cmd(message: Message):
             await set_admin_rights(int(hublox_id), user_id, is_admin=False)
         if hubsup_id:
             await set_admin_rights(int(hubsup_id), user_id, is_admin=False)
-        await message.answer(f"✅ @{username} понижен до уровня 0 (участник) и удалён из списка модераторов, права и тег сняты.")
+        await message.answer(f"✅ @{username or user_id} понижен до уровня 0 (участник) и удалён из списка модераторов, права и тег сняты.")
     else:
-        await db.execute("UPDATE moderators SET level=$1, role=$2 WHERE user_id=$3", new_level, get_role_name(new_level), user_id)
         role_title = get_role_name(new_level)
+        await db.execute("UPDATE moderators SET level=$1, role=$2, username=$3 WHERE user_id=$4", new_level, role_title, username, user_id)
         hublox_id = await get_config("hublox_id")
         hubsup_id = await get_config("hubsup_id")
         if hublox_id:
             await set_admin_rights(int(hublox_id), user_id, is_admin=True, custom_title=role_title)
         if hubsup_id:
             await set_admin_rights(int(hubsup_id), user_id, is_admin=True, custom_title=role_title)
-        await message.answer(f"✅ @{username} понижен до уровня {new_level} ({role_title}), тег обновлён.")
+        await message.answer(f"✅ @{username or user_id} понижен до уровня {new_level} ({role_title}), тег обновлён.")
     await update_admin_list()
 
 # --- /warn ---
@@ -610,16 +508,20 @@ async def warn_cmd(message: Message):
     levels = ["предупреждение", "мут на 5 минут", "мут на 24 часа", "бан"]
     level_lines = [f" • {i+1}/4 - {levels[i]} {'⚠️' if i+1 == warn_count else ''}" for i in range(4)]
     chat_msg = f"{user_mention} получает варн ({warn_count}/4)\nПричина: «{reason}»\n— · —\n" + "\n".join(level_lines) + f"\n— · —\nID варна: {warn_number}\n— · —"
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Подать аппеляцию", url="https://t.me/duosup_bot")]])
+    
+    bot_info = await bot.get_me()
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Подать аппеляцию", url=f"https://t.me/{bot_info.username}")]])
     if msg_id:
-        keyboard.inline_keyboard.append([InlineKeyboardButton(text="Перейти к сообщению", url=f"https://t.me/c/{message.chat.id}/{msg_id}")])
+        keyboard.inline_keyboard.append([InlineKeyboardButton(text="Перейти к сообщению", url=get_message_url(message.chat.id, msg_id))])
+    
     await message.reply(chat_msg, parse_mode="Markdown", reply_markup=keyboard)
     hubsup_id = await get_config("hubsup_id")
     if hubsup_id:
+        mod_mention = f"@{message.from_user.username}" if message.from_user.username else message.from_user.first_name
         await bot.send_message(
             chat_id=int(hubsup_id),
             message_thread_id=TOPIC_MOD_CHAT,
-            text=f"**ВЫДАН ВАРН**\nПричина: {reason}\nID варна: {warn_number}\nПользователь: {user_mention}\nID: `{user_id}`\nПредупреждений: {warn_count}/4\nКем выдан: @{message.from_user.username or message.from_user.first_name}\nЧат ID: `{message.chat.id}`\nВремя выдачи: {datetime.now().strftime('%H:%M:%S')} по МКС",
+            text=f"**ВЫДАН ВАРН**\nПричина: {reason}\nID варна: {warn_number}\nПользователь: {user_mention}\nID: `{user_id}`\nПредупреждений: {warn_count}/4\nКем выдан: {mod_mention}\nЧат ID: `{message.chat.id}`\nВремя выдачи: {datetime.now().strftime('%H:%M:%S')} по МКС",
             parse_mode="Markdown"
         )
     if warn_count >= 4:
@@ -657,16 +559,20 @@ async def ban_cmd(message: Message):
     await db.execute("INSERT INTO ban_logs (user_id, ban_number, reason, moderator_id, chat_id, message_id, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7)", user_id, ban_number, reason, message.from_user.id, message.chat.id, msg_id, int(datetime.now().timestamp()))
     user_mention = f"@{username}" if username else f"[{user_id}](tg://user?id={user_id})"
     chat_msg = f"{user_mention} получает бан\nПричина: «{reason}»\n— · —\nID бана: {ban_number}\n— · —"
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Подать аппеляцию", url="https://t.me/duosup_bot")]])
+    
+    bot_info = await bot.get_me()
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Подать аппеляцию", url=f"https://t.me/{bot_info.username}")]])
     if msg_id:
-        keyboard.inline_keyboard.append([InlineKeyboardButton(text="Перейти к сообщению", url=f"https://t.me/c/{message.chat.id}/{msg_id}")])
+        keyboard.inline_keyboard.append([InlineKeyboardButton(text="Перейти к сообщению", url=get_message_url(message.chat.id, msg_id))])
+    
     await message.reply(chat_msg, parse_mode="Markdown", reply_markup=keyboard)
     hubsup_id = await get_config("hubsup_id")
     if hubsup_id:
+        mod_mention = f"@{message.from_user.username}" if message.from_user.username else message.from_user.first_name
         await bot.send_message(
             chat_id=int(hubsup_id),
             message_thread_id=TOPIC_MOD_CHAT,
-            text=f"**ВЫДАН БАН**\nПричина: {reason}\nID бана: {ban_number}\nПользователь: {user_mention}\nID: `{user_id}`\nКем выдан: @{message.from_user.username or message.from_user.first_name}\nЧат ID: `{message.chat.id}`\nВремя выдачи: {datetime.now().strftime('%H:%M:%S')} по МКС",
+            text=f"**ВЫДАН БАН**\nПричина: {reason}\nID бана: {ban_number}\nПользователь: {user_mention}\nID: `{user_id}`\nКем выдан: {mod_mention}\nЧат ID: `{message.chat.id}`\nВремя выдачи: {datetime.now().strftime('%H:%M:%S')} по МКС",
             parse_mode="Markdown"
         )
 
@@ -697,14 +603,15 @@ async def unwarn_cmd(message: Message):
     await db.execute("INSERT INTO unwarn_logs (user_id, unwarn_number, moderator_id, chat_id, message_id, created_at) VALUES ($1, $2, $3, $4, $5, $6)", user_id, unwarn_number, message.from_user.id, message.chat.id, msg_id, int(datetime.now().timestamp()))
     user_mention = f"@{username}" if username else f"[{user_id}](tg://user?id={user_id})"
     chat_msg = f"С пользователя {user_mention} сняты ограничения (0/4)\n— · —\nПожалуйста прочитайте правила сообщества по лучше.\n— · —\nНомер снятия: {unwarn_number}"
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Перейти к сообщению", url=f"https://t.me/c/{message.chat.id}/{msg_id}")]]) if msg_id else None
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Перейти к сообщению", url=get_message_url(message.chat.id, msg_id))]]) if msg_id else None
     await message.reply(chat_msg, parse_mode="Markdown", reply_markup=keyboard)
     hubsup_id = await get_config("hubsup_id")
     if hubsup_id:
+        mod_mention = f"@{message.from_user.username}" if message.from_user.username else message.from_user.first_name
         await bot.send_message(
             chat_id=int(hubsup_id),
             message_thread_id=TOPIC_MOD_CHAT,
-            text=f"**СНЯТ ВАРН**\nПричина: (снятие варнов)\nНомер снятия: {unwarn_number}\nПользователь: {user_mention}\nID: `{user_id}`\nКем снят: @{message.from_user.username or message.from_user.first_name}\nЧат ID: `{message.chat.id}`\nВремя снятия: {datetime.now().strftime('%H:%M:%S')} по МКС\nПожалуйста ознакомитесь с правилами сообщества по лучше.",
+            text=f"**СНЯТ ВАРН**\nПричина: (снятие варнов)\nНомер снятия: {unwarn_number}\nПользователь: {user_mention}\nID: `{user_id}`\nКем снят: {mod_mention}\nЧат ID: `{message.chat.id}`\nВремя снятия: {datetime.now().strftime('%H:%M:%S')} по МКС\nПожалуйста ознакомитесь с правилами сообщества по лучше.",
             parse_mode="Markdown"
         )
 
@@ -735,14 +642,15 @@ async def unban_cmd(message: Message):
     await db.execute("INSERT INTO unban_logs (user_id, unban_number, moderator_id, chat_id, message_id, created_at) VALUES ($1, $2, $3, $4, $5, $6)", user_id, unban_number, message.from_user.id, message.chat.id, msg_id, int(datetime.now().timestamp()))
     user_mention = f"@{username}" if username else f"[{user_id}](tg://user?id={user_id})"
     chat_msg = f"С пользователя {user_mention} сняты ограничения (0/4)\n— · —\nПожалуйста прочитайте правила сообщества по лучше.\n— · —\nНомер снятия: {unban_number}"
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Перейти к сообщению", url=f"https://t.me/c/{message.chat.id}/{msg_id}")]]) if msg_id else None
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Перейти к сообщению", url=get_message_url(message.chat.id, msg_id))]]) if msg_id else None
     await message.reply(chat_msg, parse_mode="Markdown", reply_markup=keyboard)
     hubsup_id = await get_config("hubsup_id")
     if hubsup_id:
+        mod_mention = f"@{message.from_user.username}" if message.from_user.username else message.from_user.first_name
         await bot.send_message(
             chat_id=int(hubsup_id),
             message_thread_id=TOPIC_MOD_CHAT,
-            text=f"**СНЯТ БАН**\nПричина: (разбан)\nНомер снятия: {unban_number}\nПользователь: {user_mention}\nID: `{user_id}`\nКем снят: @{message.from_user.username or message.from_user.first_name}\nЧат ID: `{message.chat.id}`\nВремя снятия: {datetime.now().strftime('%H:%M:%S')} по МКС\nПожалуйста ознакомитесь с правилами сообщества по лучше.",
+            text=f"**СНЯТ БАН**\nПричина: (разбан)\nНомер снятия: {unban_number}\nПользователь: {user_mention}\nID: `{user_id}`\nКем снят: {mod_mention}\nЧат ID: `{message.chat.id}`\nВремя снятия: {datetime.now().strftime('%H:%M:%S')} по МКС\nПожалуйста ознакомитесь с правилами сообщества по лучше.",
             parse_mode="Markdown"
         )
 
@@ -778,15 +686,12 @@ async def stats_cmd(message: Message):
     bans = await db.fetchval("SELECT COUNT(*) FROM ban_logs")
     unbans = await db.fetchval("SELECT COUNT(*) FROM unban_logs")
     unwarns = await db.fetchval("SELECT COUNT(*) FROM unwarn_logs")
-    await message.answer(
-        f"📊 **Статистика**\nАктивных варнов: {warns}\nВсего банов: {bans}\nВсего разбанов: {unbans}\nВсего снятий варнов: {unwarns}"
-    )
+    await message.answer(f"📊 **Статистика**\nАктивных варнов: {warns}\nВсего банов: {bans}\nВсего разбанов: {unbans}\nВсего снятий варнов: {unwarns}")
 
-# --- Обработчик "Бот" ---
-@dp.message(F.text)
+# --- Обработчик триггера "бот" ---
+@dp.message(F.text.lower() == "бот")
 async def bot_mention(message: Message):
-    if message.text and message.text.lower() == "бот":
-        await message.reply("На месте ✅")
+    await message.reply("На месте ✅")
 
 # ======================= АППЕЛЯЦИИ =======================
 @dp.message(Command("appeal"))
@@ -817,19 +722,20 @@ async def appeal_start(message: Message, state: FSMContext):
 
 @dp.message(AppealStates.waiting_for_appeal)
 async def appeal_text(message: Message, state: FSMContext):
-    text = message.text
+    text = message.text or ""
     lines = text.split('\n')
     violation_number = None
     username = None
     appeal_text = []
     for line in lines:
-        if line.startswith('#-'):
-            violation_number = line.strip()
-        elif line.startswith('@'):
-            username = line.strip()
+        s_line = line.strip()
+        if s_line.startswith('#-'):
+            violation_number = s_line
+        elif s_line.startswith('@'):
+            username = s_line
         else:
-            if line.strip():
-                appeal_text.append(line.strip())
+            if s_line:
+                appeal_text.append(s_line)
     if not violation_number or not username:
         await message.answer("❌ Неверный формат. Пожалуйста, следуйте шаблону.")
         return
@@ -854,7 +760,7 @@ async def appeal_text(message: Message, state: FSMContext):
         ])
         await bot.send_message(chat_id=int(hubsup_id), message_thread_id=TOPIC_APPEALS, text=report, parse_mode="Markdown", reply_markup=kb)
 
-@dp.callback_query(lambda c: c.data.startswith("appeal_"))
+@dp.callback_query(lambda c: c.data and c.data.startswith("appeal_"))
 async def appeal_callback(callback: CallbackQuery):
     data = callback.data.split('_')
     action = data[1]
@@ -865,15 +771,21 @@ async def appeal_callback(callback: CallbackQuery):
         return
     if action == "approve":
         await db.execute("UPDATE appeals SET status='approved' WHERE appeal_number=$1", appeal_number)
-        await bot.send_message(chat_id=user_id, text="✅ Ваша заявка была одобрена.")
+        try:
+            await bot.send_message(chat_id=user_id, text="✅ Ваша заявка была одобрена.")
+        except Exception:
+            pass
         await callback.message.edit_text(f"{callback.message.text}\n\n✅ Одобрено модератором.")
     else:
         await db.execute("UPDATE appeals SET status='rejected' WHERE appeal_number=$1", appeal_number)
-        await bot.send_message(chat_id=user_id, text="❌ Ваша заявка была отклонена.")
+        try:
+            await bot.send_message(chat_id=user_id, text="❌ Ваша заявка была отклонена.")
+        except Exception:
+            pass
         await callback.message.edit_text(f"{callback.message.text}\n\n❌ Отказано модератором.")
     await callback.answer("Готово.")
 
-@dp.callback_query(lambda c: c.data.startswith("report_"))
+@dp.callback_query(lambda c: c.data and c.data.startswith("report_"))
 async def report_callback(callback: CallbackQuery):
     if not await check_permission(callback.message, 1):
         await callback.answer("⛔ Недостаточно прав.", show_alert=True)
@@ -886,46 +798,62 @@ async def welcome_new_member(message: Message):
     hublox_id = await get_config("hublox_id")
     if not hublox_id or str(message.chat.id) != hublox_id:
         return
+    bot_info = await bot.get_me()
     for member in message.new_chat_members:
-        if member.id == bot.id:
+        if member.id == bot_info.id:
             continue
         user_mention = f"@{member.username}" if member.username else member.full_name
-        template = await get_template('welcome_template')
+        template = await get_template('welcome_template') or "{user}\nДобро пожаловать в HuBBlox"
         if '{user}' in template:
             msg = template.format(user=user_mention)
         else:
             msg = f"{user_mention}\n{template}"
-        await bot.send_message(chat_id=message.chat.id, message_thread_id=TOPIC_WELCOME, text=msg)
+        try:
+            await bot.send_message(chat_id=message.chat.id, message_thread_id=TOPIC_WELCOME, text=msg)
+        except Exception as e:
+            logging.error(f"Ошибка отправки приветствия: {e}")
 
-# ======================= ОБРАБОТЧИК ССЫЛОК =======================
+# ======================= ОБРАБОТЧИК СООБЩЕНИЙ И АВТОМОДЕРАЦИЯ =======================
 @dp.message(F.text)
 async def handle_all_messages(message: Message):
-    if message.text.lower() == "бот":
+    if message.chat.type == "private":
         return
     if message.message_thread_id in IGNORED_TOPICS:
         return
     hublox_id = await get_config("hublox_id")
     if not hublox_id or str(message.chat.id) != hublox_id:
         return
+
+    # Автомодерация ссылок
     if message.from_user.id != CREATOR_ID and re.search(r'https?://\S+', message.text):
-        # Автоматический варн за ссылку
-        warn_count, warn_number = await add_warn(message.from_user.id, f"Нарушение: ссылка", bot.id, message.chat.id, message.message_id)
+        try:
+            await message.delete()
+        except Exception:
+            pass
+
+        warn_count, warn_number = await add_warn(message.from_user.id, "Ссылка", bot.id, message.chat.id, message.message_id)
         user_mention = f"@{message.from_user.username}" if message.from_user.username else f"[{message.from_user.id}](tg://user?id={message.from_user.id})"
         levels = ["предупреждение", "мут на 5 минут", "мут на 24 часа", "бан"]
         level_lines = [f" • {i+1}/4 - {levels[i]} {'⚠️' if i+1 == warn_count else ''}" for i in range(4)]
         chat_msg = f"{user_mention} получает варн ({warn_count}/4)\nПричина: «Ссылка»\n— · —\n" + "\n".join(level_lines) + f"\n— · —\nID варна: {warn_number}\n— · —"
+        
+        bot_info = await bot.get_me()
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="Подать аппеляцию", url="https://t.me/duosup_bot")],
-            [InlineKeyboardButton(text="Перейти к сообщению", url=f"https://t.me/c/{message.chat.id}/{message.message_id}")]
+            [InlineKeyboardButton(text="Подать аппеляцию", url=f"https://t.me/{bot_info.username}")]
         ])
-        await message.reply(chat_msg, parse_mode="Markdown", reply_markup=keyboard)
+        await message.answer(chat_msg, parse_mode="Markdown", reply_markup=keyboard)
+        
         if warn_count >= 4:
             await bot.restrict_chat_member(chat_id=message.chat.id, user_id=message.from_user.id, permissions=ChatPermissions(can_send_messages=False))
             await db.execute("UPDATE users SET banned=TRUE, ban_until=NULL WHERE user_id=$1", message.from_user.id)
         return
+
+    # Удаление сообщений забаненных
     if await is_banned(message.from_user.id):
-        await message.delete()
-        await message.answer("Вы забанены и не можете писать.")
+        try:
+            await message.delete()
+        except Exception:
+            pass
 
 # ======================= ЗАПУСК =======================
 async def main():
