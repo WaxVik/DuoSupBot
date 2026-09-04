@@ -3,7 +3,7 @@ import logging
 import secrets
 import string
 import re
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import asyncpg
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
@@ -80,7 +80,7 @@ async def get_template(key):
     row = await db.fetchrow("SELECT value FROM templates WHERE key=$1", key)
     return row[0] if row else None
 
-async def set_template(key, value):   # <-- ЭТУ ФУНКЦИЮ НУЖНО БЫЛО ДОБАВИТЬ
+async def set_template(key, value):
     await db.execute(
         "INSERT INTO templates (key, value) VALUES ($1, $2) ON CONFLICT (key) DO UPDATE SET value=$2",
         key, value
@@ -189,20 +189,40 @@ async def can_punish(moderator_id, target_id):
         return False, "⛔ Ваш ранг слишком низок для выдачи наказаний.", mod_level, target_level
     return True, None, mod_level, target_level
 
-# ========================== НОВЫЙ УНИВЕРСАЛЬНЫЙ ПАРСИНГ ==========================
+# ========================== НОВЫЙ ПАРСИНГ (КАК У ПОДРУГИ) ==========================
+def replied_user(message: Message):
+    """Возвращает пользователя, на чьё сообщение ответили."""
+    if message.reply_to_message:
+        return message.reply_to_message.from_user
+    return None
+
 async def resolve_user(message: Message, args=None):
     """
     Определяет пользователя по:
-    1. Ответу на сообщение (reply) — приоритет
-    2. Первому аргументу, если он начинается с @ (username)
-    3. Первому аргументу, если он число (ID)
-    Возвращает (user_id, username) или (None, None)
+    1. Ответу (reply)
+    2. Первому аргументу, если он @username или ID
+    3. Если в тексте команды есть упоминание @username (не в аргументах)
+    Возвращает (user_id, username)
     """
-    if message.reply_to_message:
-        user = message.reply_to_message.from_user
-        if user:
-            return user.id, user.username
-    if args and len(args) > 0:
+    # 1. Reply
+    user = replied_user(message)
+    if user:
+        return user.id, user.username
+
+    if not args:
+        # Если аргументов нет, пробуем найти упоминание в тексте команды
+        full_text = message.text or ""
+        mentions = re.findall(r'@(\w+)', full_text)
+        if mentions:
+            for username in mentions:
+                try:
+                    chat = await bot.get_chat(f"@{username}")
+                    if chat and chat.type == "private":
+                        return chat.id, chat.username
+                except:
+                    continue
+
+    if args:
         token = args[0].strip()
         if token.startswith('@'):
             username = token[1:]
@@ -210,7 +230,7 @@ async def resolve_user(message: Message, args=None):
                 chat = await bot.get_chat(f"@{username}")
                 if chat and chat.type == "private":
                     return chat.id, chat.username
-            except Exception:
+            except:
                 pass
         elif token.isdigit():
             user_id = int(token)
@@ -218,14 +238,15 @@ async def resolve_user(message: Message, args=None):
                 chat = await bot.get_chat(user_id)
                 if chat and chat.type == "private":
                     return chat.id, chat.username
-            except Exception:
+            except:
                 pass
-    return None, None
 
-def build_warn_msg(user_mention, warn_count, reason, warn_number):
-    levels = ["предупреждение", "мут на 5 минут", "мут на 24 часа", "бан"]
-    level_lines = [f" • {i+1}/4 - {levels[i]} {'⚠️' if i+1 == warn_count else ''}" for i in range(4)]
-    return f"{user_mention} получает варн ({warn_count}/4)\nПричина: «{reason}»\n— · —\n" + "\n".join(level_lines) + f"\n— · —\nID варна: {warn_number}\n— · —"
+    # Если не нашли, но есть reply (повторно проверяем на случай, если reply есть, но мы его пропустили)
+    user = replied_user(message)
+    if user:
+        return user.id, user.username
+
+    return None, None
 
 # ========================== ОБНОВЛЕНИЕ СПИСКА АДМИНОВ ==========================
 async def update_admin_list():
@@ -264,7 +285,6 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=storage)
 
 # ========================== КОМАНДЫ ==========================
-
 @dp.message(Command("start"))
 async def start_cmd(msg: Message):
     await msg.answer(
@@ -329,7 +349,7 @@ async def redact_rule(msg: Message, state: FSMContext):
         major, minor = map(int, current.split('.'))
         minor += 1
         new_ver = f"{major}.{minor}"
-        await set_template('rules_version', new_ver)   # <-- теперь работает
+        await set_template('rules_version', new_ver)
         await db.execute("INSERT INTO rules (version, rule_text, created_at) VALUES ($1, $2, $3)", new_ver, text, int(datetime.now().timestamp()))
         hublox = await get_config("hublox_id")
         if hublox:
@@ -373,7 +393,6 @@ async def upmod_cmd(msg: Message):
     new_level = current_level + 1
     await set_moderator_level(target_id, new_level, target_username)
 
-    # Повышаем в обоих чатах
     hublox = await get_config("hublox_id")
     hubsup = await get_config("hubsup_id")
     if hublox:
@@ -491,39 +510,51 @@ async def downmod_cmd(msg: Message):
     await update_admin_list()
     await msg.answer(f"✅ @{target_username or target_id} понижен до уровня {new_level} ({get_role_name(new_level)}).")
 
-# ========================== /warn ==========================
+def build_warn_msg(user_mention, warn_count, reason, warn_number):
+    levels = ["предупреждение", "мут на 5 минут", "мут на 24 часа", "бан"]
+    level_lines = [f" • {i+1}/4 - {levels[i]} {'⚠️' if i+1 == warn_count else ''}" for i in range(4)]
+    return f"{user_mention} получает варн ({warn_count}/4)\nПричина: «{reason}»\n— · —\n" + "\n".join(level_lines) + f"\n— · —\nID варна: {warn_number}\n— · —"
+
+# ========================== /warn (исправленный) ==========================
 @dp.message(Command("warn"))
 async def warn_cmd(msg: Message):
     if not await check_permission(msg.from_user.id, 4):
         await msg.answer("⛔ Выдавать варны могут только администраторы (ранг 4+).")
         return
 
-    args = msg.text.split()[1:]  # все аргументы после команды
+    # Разбиваем команду на аргументы
+    parts = msg.text.split(maxsplit=1)
+    args = parts[1].split() if len(parts) > 1 else []
+    reason = ""
     target_id = None
     target_username = None
-    reason = ""
 
+    # Пытаемся найти цель
     if msg.reply_to_message:
         user = msg.reply_to_message.from_user
         if user:
             target_id = user.id
             target_username = user.username
-        if args:
-            reason = " ".join(args).strip()
+            # Причина — всё, что после команды (если есть)
+            if args:
+                reason = " ".join(args).strip()
+        else:
+            await msg.answer("⚠️ Не удалось определить пользователя в ответе.")
+            return
     else:
+        # Без reply: первый аргумент — цель, остальное — причина
         if not args:
             await msg.answer("⚠️ Используйте команду с ответом на сообщение или укажите @Username или ID и укажите причину.")
             return
         token = args[0]
         reason = " ".join(args[1:]).strip()
-        # Определяем пользователя
         target_id, target_username = await resolve_user(msg, [token])
         if not target_id:
-            await msg.answer("⚠️ Не удалось определить пользователя. Укажите @username или ID.")
+            await msg.answer("⚠️ Пользователь не найден. Укажите @username или ID, либо ответьте на его сообщение.")
             return
 
     if not target_id:
-        await msg.answer("⚠️ Используйте команду с ответом на сообщение или укажите @Username или ID и укажите причину.")
+        await msg.answer("⚠️ Не удалось определить пользователя.")
         return
     if not reason:
         await msg.answer("⚠️ Укажите причину.")
@@ -532,6 +563,7 @@ async def warn_cmd(msg: Message):
         await msg.answer("❌ Нельзя выдать варн самому себе.")
         return
 
+    # Проверка прав
     allowed, err_msg, mod_level, target_level = await can_punish(msg.from_user.id, target_id)
     if not allowed:
         hubsup_id = await get_config("hubsup_id")
@@ -592,25 +624,29 @@ async def warn_cmd(msg: Message):
         await bot.restrict_chat_member(msg.chat.id, target_id, permissions=ChatPermissions(can_send_messages=False))
         await db.execute("UPDATE users SET banned=TRUE, ban_until=NULL WHERE user_id=$1", target_id)
 
-# ========================== /ban ==========================
+# ========================== /ban (исправленный) ==========================
 @dp.message(Command("ban"))
 async def ban_cmd(msg: Message):
     if not await check_permission(msg.from_user.id, 6):
         await msg.answer("⛔ Выдавать баны могут только Главный администратор и Создатель (ранг 6+).")
         return
 
-    args = msg.text.split()[1:]
+    parts = msg.text.split(maxsplit=1)
+    args = parts[1].split() if len(parts) > 1 else []
+    reason = ""
     target_id = None
     target_username = None
-    reason = ""
 
     if msg.reply_to_message:
         user = msg.reply_to_message.from_user
         if user:
             target_id = user.id
             target_username = user.username
-        if args:
-            reason = " ".join(args).strip()
+            if args:
+                reason = " ".join(args).strip()
+        else:
+            await msg.answer("⚠️ Не удалось определить пользователя в ответе.")
+            return
     else:
         if not args:
             await msg.answer("⚠️ Используйте команду с ответом на сообщение или укажите @Username или ID и укажите причину.")
@@ -619,11 +655,11 @@ async def ban_cmd(msg: Message):
         reason = " ".join(args[1:]).strip()
         target_id, target_username = await resolve_user(msg, [token])
         if not target_id:
-            await msg.answer("⚠️ Не удалось определить пользователя.")
+            await msg.answer("⚠️ Пользователь не найден. Укажите @username или ID, либо ответьте на его сообщение.")
             return
 
     if not target_id:
-        await msg.answer("⚠️ Используйте команду с ответом на сообщение или укажите @Username или ID и укажите причину.")
+        await msg.answer("⚠️ Не удалось определить пользователя.")
         return
     if not reason:
         await msg.answer("⚠️ Укажите причину.")
@@ -691,7 +727,7 @@ async def ban_cmd(msg: Message):
             reply_markup=admin_kb
         )
 
-# ========================== /unwarn ==========================
+# ========================== /unwarn (исправленный) ==========================
 @dp.message(Command("unwarn"))
 async def unwarn_cmd(msg: Message):
     if not await check_permission(msg.from_user.id, 6):
@@ -758,7 +794,7 @@ async def unwarn_cmd(msg: Message):
             parse_mode="Markdown"
         )
 
-# ========================== /unban ==========================
+# ========================== /unban (исправленный) ==========================
 @dp.message(Command("unban"))
 async def unban_cmd(msg: Message):
     if not await check_permission(msg.from_user.id, 6):
