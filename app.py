@@ -217,7 +217,7 @@ async def update_admin_list():
             uid, uname, lvl, role = row
             mention = f"@{uname}" if uname else f"[{uid}](tg://user?id={uid})"
             lines.append(f"{mention} — {role if role else get_role_name(lvl)}")
-        lines.append(f"@{bot.username} — Создатель (владелец)")
+        # Создатель не добавляется в список, он и так известен
         text = "👥 **Состав администрации:**\n" + "\n".join(lines)
 
     for chat_key, topic in [("hubsup_id", TOPICS["modlist"]), ("hublox_id", TOPICS["admin"])]:
