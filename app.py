@@ -17,7 +17,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 
 # ========================== НАСТРОЙКИ ==========================
 BOT_TOKEN = "8970388836:AAEc_r1mZoswY_nKWTQOxcQbg3vXR4ehD8M"
-CREATOR_ID = 7675985792  # Ранг 7 – создатель
+CREATOR_ID = 7675985792
 DATABASE_URL = "postgresql://postgres:RsGrWajXqIorzUjiGwAJQiXoOqWzEYcx@postgres.railway.internal:5432/railway"
 
 TOPICS = {
@@ -66,7 +66,6 @@ async def init_db():
         await db.execute("INSERT INTO config (key, value) VALUES ($1, $2) ON CONFLICT (key) DO NOTHING", counter, '0')
     for key in ['link_code', 'hublox_id', 'hubsup_id']:
         await db.execute("INSERT INTO config (key, value) VALUES ($1, $2) ON CONFLICT (key) DO NOTHING", key, '')
-    # Создаём запись для создателя с рангом 7
     await db.execute("INSERT INTO moderators (user_id, username, level, role) VALUES ($1, $2, 7, 'Создатель') ON CONFLICT (user_id) DO NOTHING",
                      CREATOR_ID, 'WaxVik0')
 
@@ -185,10 +184,6 @@ async def can_punish(moderator_id, target_id):
         return False, "⛔ Ваш ранг слишком низок для выдачи наказаний.", mod_level, target_level
     return True, None, mod_level, target_level
 
-async def send_report_to_admin(chat_id, topic_id, text):
-    if chat_id and topic_id:
-        await bot.send_message(chat_id=chat_id, message_thread_id=topic_id, text=text, parse_mode="Markdown")
-
 # ========================== ИСПРАВЛЕННАЯ ФУНКЦИЯ ПАРСИНГА ==========================
 async def parse_warn_ban_command(message: Message, command_type: str):
     """
@@ -202,7 +197,7 @@ async def parse_warn_ban_command(message: Message, command_type: str):
     else:
         return None, None, None, None
 
-    # 1. Если есть reply
+    # 1. Если есть reply – берём автора ответа (самый надёжный способ)
     if message.reply_to_message:
         user = message.reply_to_message.from_user
         if user:
@@ -210,27 +205,35 @@ async def parse_warn_ban_command(message: Message, command_type: str):
             if not reason:
                 return None, None, None, None
             return user.id, user.username, reason, message.reply_to_message.message_id
-        else:
-            return None, None, None, None
+        return None, None, None, None
 
-    # 2. Ищем @username в тексте
-    match = re.search(r'@(\w+)', text)
-    if match:
-        username = match.group(1)
-        reason = text.replace(f"@{username}", "").strip()
-        if not reason:
-            return None, None, None, None
-        try:
-            chat = await bot.get_chat(f"@{username}")
-            if chat and chat.type == "private":
-                if chat.id == message.from_user.id:
-                    return None, None, None, None
-                return chat.id, chat.username, reason, None
-            else:
-                return None, None, None, None
-        except Exception as e:
-            logging.error(f"Ошибка получения пользователя @{username}: {e}")
-            return None, None, None, None
+    # 2. Ищем упоминания через entities (официальный способ)
+    if message.entities:
+        sender_id = message.from_user.id
+        for entity in message.entities:
+            if entity.type == "mention":
+                # Получаем текст упоминания (например, @username)
+                mention_text = text[entity.offset:entity.offset + entity.length]
+                username = mention_text.replace('@', '')
+                try:
+                    # Пытаемся получить пользователя через API
+                    chat = await bot.get_chat(f"@{username}")
+                    if chat:
+                        # Исключаем упоминание самого отправителя
+                        if chat.id == sender_id:
+                            continue
+                        # Проверяем, что это именно пользователь, а не группа/канал
+                        if chat.type == "private":
+                            # Убираем упоминание из текста, остаётся причина
+                            reason = text.replace(mention_text, "").strip()
+                            if not reason:
+                                return None, None, None, None
+                            return chat.id, chat.username, reason, None
+                except Exception as e:
+                    logging.error(f"Ошибка получения пользователя @{username}: {e}")
+                    continue
+
+    # 3. Если ничего не нашли
     return None, None, None, None
 
 async def parse_unwarn_unban_command(message: Message, command_type: str):
@@ -251,15 +254,18 @@ async def parse_unwarn_unban_command(message: Message, command_type: str):
             return user.id, user.username, message.reply_to_message.message_id
         return None, None, None
 
-    match = re.search(r'@(\w+)', text)
-    if match:
-        username = match.group(1)
-        try:
-            chat = await bot.get_chat(f"@{username}")
-            if chat and chat.type == "private":
-                return chat.id, chat.username, None
-        except:
-            return None, None, None
+    if message.entities:
+        sender_id = message.from_user.id
+        for entity in message.entities:
+            if entity.type == "mention":
+                mention_text = text[entity.offset:entity.offset + entity.length]
+                username = mention_text.replace('@', '')
+                try:
+                    chat = await bot.get_chat(f"@{username}")
+                    if chat and chat.type == "private" and chat.id != sender_id:
+                        return chat.id, chat.username, None
+                except:
+                    continue
     return None, None, None
 
 # ========================== ОБНОВЛЕНИЕ СПИСКА АДМИНИСТРАТОРОВ ==========================
@@ -498,7 +504,6 @@ async def downmod_cmd(msg: Message):
     await msg.answer(f"✅ @{uname} понижен до уровня {new_level} ({get_role_name(new_level)}).")
     await update_admin_list()
 
-# ========================== build_warn_msg ==========================
 def build_warn_msg(user_mention, warn_count, reason, warn_number):
     levels = ["предупреждение", "мут на 5 минут", "мут на 24 часа", "бан"]
     level_lines = [f" • {i+1}/4 - {levels[i]} {'⚠️' if i+1 == warn_count else ''}" for i in range(4)]
