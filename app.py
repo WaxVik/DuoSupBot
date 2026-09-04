@@ -16,9 +16,9 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 
 # ========================== НАСТРОЙКИ ==========================
-BOT_TOKEN = "8970388836:AAEc_r1mZoswY_nKWTQOxcQbg3vXR4ehD8M"  # новый токен
+BOT_TOKEN = "8970388836:AAEc_r1mZoswY_nKWTQOxcQbg3vXR4ehD8M"
 CREATOR_ID = 7675985792
-DATABASE_URL = "postgresql://postgres:RsGrWajXqIorzUjiGwAJQiXoOqWzEYcx@postgres.railway.internal:5432/railway"  # НОВЫЙ!
+DATABASE_URL = "postgresql://postgres:RsGrWajXqIorzUjiGwAJQiXoOqWzEYcx@postgres.railway.internal:5432/railway"
 
 TOPICS = {
     "mod_chat": 6,
@@ -166,7 +166,8 @@ async def get_target_user(message: Message):
         if user:
             return user.id, user.username, message.reply_to_message.message_id
         return None
-    match = re.search(r'@(\w+)', message.text)
+    text = message.text
+    match = re.search(r'@(\w+)', text)
     if match:
         username = match.group(1)
         try:
@@ -433,17 +434,32 @@ async def warn_cmd(msg: Message):
     mention = f"@{uname}" if uname else f"[{uid}](tg://user?id={uid})"
     chat_msg = build_warn_msg(mention, warn_count, reason, warn_number)
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Подать аппеляцию", url="https://t.me/duosup_bot")]])
-    if mid:
-        kb.inline_keyboard.append([InlineKeyboardButton(text="Перейти к сообщению", url=f"https://t.me/c/{msg.chat.id}/{mid}")])
     await msg.reply(chat_msg, parse_mode="Markdown", reply_markup=kb)
 
     hubsup = await get_config("hubsup_id")
     if hubsup:
+        admin_text = (
+            f"**ВЫДАН ВАРН**\n"
+            f"Причина: {reason}\n"
+            f"ID варна: {warn_number}\n"
+            f"Пользователь: {mention}\n"
+            f"ID: `{uid}`\n"
+            f"Предупреждений: {warn_count}/4\n"
+            f"Кем выдан: @{msg.from_user.username or msg.from_user.first_name}\n"
+            f"Чат ID: `{msg.chat.id}`\n"
+            f"Время выдачи: {datetime.now().strftime('%H:%M:%S')} по МКС"
+        )
+        admin_kb = None
+        if mid:
+            admin_kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="Перейти к сообщению", url=f"https://t.me/c/{msg.chat.id}/{mid}")]
+            ])
         await bot.send_message(
             chat_id=int(hubsup),
             message_thread_id=TOPICS["mod_chat"],
-            text=f"**ВЫДАН ВАРН**\nПричина: {reason}\nID варна: {warn_number}\nПользователь: {mention}\nID: `{uid}`\nПредупреждений: {warn_count}/4\nКем выдан: @{msg.from_user.username or msg.from_user.first_name}\nЧат ID: `{msg.chat.id}`\nВремя выдачи: {datetime.now().strftime('%H:%M:%S')} по МКС",
-            parse_mode="Markdown"
+            text=admin_text,
+            parse_mode="Markdown",
+            reply_markup=admin_kb
         )
     if warn_count >= 4:
         await bot.restrict_chat_member(msg.chat.id, uid, permissions=ChatPermissions(can_send_messages=False))
@@ -481,16 +497,31 @@ async def ban_cmd(msg: Message):
     mention = f"@{uname}" if uname else f"[{uid}](tg://user?id={uid})"
     chat_msg = f"{mention} получает бан\nПричина: «{reason}»\n— · —\nID бана: {ban_num}\n— · —"
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Подать аппеляцию", url="https://t.me/duosup_bot")]])
-    if mid:
-        kb.inline_keyboard.append([InlineKeyboardButton(text="Перейти к сообщению", url=f"https://t.me/c/{msg.chat.id}/{mid}")])
     await msg.reply(chat_msg, parse_mode="Markdown", reply_markup=kb)
+
     hubsup = await get_config("hubsup_id")
     if hubsup:
+        admin_text = (
+            f"**ВЫДАН БАН**\n"
+            f"Причина: {reason}\n"
+            f"ID бана: {ban_num}\n"
+            f"Пользователь: {mention}\n"
+            f"ID: `{uid}`\n"
+            f"Кем выдан: @{msg.from_user.username or msg.from_user.first_name}\n"
+            f"Чат ID: `{msg.chat.id}`\n"
+            f"Время выдачи: {datetime.now().strftime('%H:%M:%S')} по МКС"
+        )
+        admin_kb = None
+        if mid:
+            admin_kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="Перейти к сообщению", url=f"https://t.me/c/{msg.chat.id}/{mid}")]
+            ])
         await bot.send_message(
             chat_id=int(hubsup),
             message_thread_id=TOPICS["mod_chat"],
-            text=f"**ВЫДАН БАН**\nПричина: {reason}\nID бана: {ban_num}\nПользователь: {mention}\nID: `{uid}`\nКем выдан: @{msg.from_user.username or msg.from_user.first_name}\nЧат ID: `{msg.chat.id}`\nВремя выдачи: {datetime.now().strftime('%H:%M:%S')} по МКС",
-            parse_mode="Markdown"
+            text=admin_text,
+            parse_mode="Markdown",
+            reply_markup=admin_kb
         )
 
 @dp.message(Command("unwarn"))
@@ -518,16 +549,33 @@ async def unwarn_cmd(msg: Message):
     await db.execute("INSERT INTO unwarn_logs (user_id, unwarn_number, moderator_id, chat_id, message_id, created_at) VALUES ($1, $2, $3, $4, $5, $6)",
                      uid, unwarn_num, msg.from_user.id, msg.chat.id, mid, int(datetime.now().timestamp()))
     mention = f"@{uname}" if uname else f"[{uid}](tg://user?id={uid})"
-    chat_msg = f"С пользователя {mention} сняты ограничения (0/4)\n— · —\nПожалуйста прочитайте правила сообщества по лучше.\n— · —\nНомер снятия: {unwarn_num}"
-    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Перейти к сообщению", url=f"https://t.me/c/{msg.chat.id}/{mid}")]]) if mid else None
+    chat_msg = f"С пользователя {mention} сняты ограничения (0/4)\n— · —\nНомер снятия: {unwarn_num}"
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Подать аппеляцию", url="https://t.me/duosup_bot")]])
     await msg.reply(chat_msg, parse_mode="Markdown", reply_markup=kb)
+
     hubsup = await get_config("hubsup_id")
     if hubsup:
+        admin_text = (
+            f"**СНЯТ ВАРН**\n"
+            f"Причина: (снятие варнов)\n"
+            f"Номер снятия: {unwarn_num}\n"
+            f"Пользователь: {mention}\n"
+            f"ID: `{uid}`\n"
+            f"Кем снят: @{msg.from_user.username or msg.from_user.first_name}\n"
+            f"Чат ID: `{msg.chat.id}`\n"
+            f"Время снятия: {datetime.now().strftime('%H:%M:%S')} по МКС"
+        )
+        admin_kb = None
+        if mid:
+            admin_kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="Перейти к сообщению", url=f"https://t.me/c/{msg.chat.id}/{mid}")]
+            ])
         await bot.send_message(
             chat_id=int(hubsup),
             message_thread_id=TOPICS["mod_chat"],
-            text=f"**СНЯТ ВАРН**\nПричина: (снятие варнов)\nНомер снятия: {unwarn_num}\nПользователь: {mention}\nID: `{uid}`\nКем снят: @{msg.from_user.username or msg.from_user.first_name}\nЧат ID: `{msg.chat.id}`\nВремя снятия: {datetime.now().strftime('%H:%M:%S')} по МКС\nПожалуйста ознакомитесь с правилами сообщества по лучше.",
-            parse_mode="Markdown"
+            text=admin_text,
+            parse_mode="Markdown",
+            reply_markup=admin_kb
         )
 
 @dp.message(Command("unban"))
@@ -556,16 +604,33 @@ async def unban_cmd(msg: Message):
     await db.execute("INSERT INTO unban_logs (user_id, unban_number, moderator_id, chat_id, message_id, created_at) VALUES ($1, $2, $3, $4, $5, $6)",
                      uid, unban_num, msg.from_user.id, msg.chat.id, mid, int(datetime.now().timestamp()))
     mention = f"@{uname}" if uname else f"[{uid}](tg://user?id={uid})"
-    chat_msg = f"С пользователя {mention} сняты ограничения (0/4)\n— · —\nПожалуйста прочитайте правила сообщества по лучше.\n— · —\nНомер снятия: {unban_num}"
-    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Перейти к сообщению", url=f"https://t.me/c/{msg.chat.id}/{mid}")]]) if mid else None
+    chat_msg = f"С пользователя {mention} сняты ограничения (0/4)\n— · —\nНомер снятия: {unban_num}"
+    kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="Подать аппеляцию", url="https://t.me/duosup_bot")]])
     await msg.reply(chat_msg, parse_mode="Markdown", reply_markup=kb)
+
     hubsup = await get_config("hubsup_id")
     if hubsup:
+        admin_text = (
+            f"**СНЯТ БАН**\n"
+            f"Причина: (разбан)\n"
+            f"Номер снятия: {unban_num}\n"
+            f"Пользователь: {mention}\n"
+            f"ID: `{uid}`\n"
+            f"Кем снят: @{msg.from_user.username or msg.from_user.first_name}\n"
+            f"Чат ID: `{msg.chat.id}`\n"
+            f"Время снятия: {datetime.now().strftime('%H:%M:%S')} по МКС"
+        )
+        admin_kb = None
+        if mid:
+            admin_kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="Перейти к сообщению", url=f"https://t.me/c/{msg.chat.id}/{mid}")]
+            ])
         await bot.send_message(
             chat_id=int(hubsup),
             message_thread_id=TOPICS["mod_chat"],
-            text=f"**СНЯТ БАН**\nПричина: (разбан)\nНомер снятия: {unban_num}\nПользователь: {mention}\nID: `{uid}`\nКем снят: @{msg.from_user.username or msg.from_user.first_name}\nЧат ID: `{msg.chat.id}`\nВремя снятия: {datetime.now().strftime('%H:%M:%S')} по МКС\nПожалуйста ознакомитесь с правилами сообщества по лучше.",
-            parse_mode="Markdown"
+            text=admin_text,
+            parse_mode="Markdown",
+            reply_markup=admin_kb
         )
 
 @dp.message(Command("report"))
@@ -725,10 +790,33 @@ async def handle_links(msg: Message):
         mention = f"@{msg.from_user.username}" if msg.from_user.username else f"[{msg.from_user.id}](tg://user?id={msg.from_user.id})"
         chat_msg = build_warn_msg(mention, warn_count, "Ссылка", warn_number)
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="Подать аппеляцию", url="https://t.me/duosup_bot")],
-            [InlineKeyboardButton(text="Перейти к сообщению", url=f"https://t.me/c/{msg.chat.id}/{msg.message_id}")]
+            [InlineKeyboardButton(text="Подать аппеляцию", url="https://t.me/duosup_bot")]
         ])
         await msg.reply(chat_msg, parse_mode="Markdown", reply_markup=kb)
+
+        hubsup = await get_config("hubsup_id")
+        if hubsup:
+            admin_text = (
+                f"**ВЫДАН ВАРН** (автоматически)\n"
+                f"Причина: Ссылка\n"
+                f"ID варна: {warn_number}\n"
+                f"Пользователь: {mention}\n"
+                f"ID: `{msg.from_user.id}`\n"
+                f"Предупреждений: {warn_count}/4\n"
+                f"Кем выдан: бот\n"
+                f"Чат ID: `{msg.chat.id}`\n"
+                f"Время выдачи: {datetime.now().strftime('%H:%M:%S')} по МКС"
+            )
+            admin_kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="Перейти к сообщению", url=f"https://t.me/c/{msg.chat.id}/{msg.message_id}")]
+            ])
+            await bot.send_message(
+                chat_id=int(hubsup),
+                message_thread_id=TOPICS["mod_chat"],
+                text=admin_text,
+                parse_mode="Markdown",
+                reply_markup=admin_kb
+            )
         if warn_count >= 4:
             await bot.restrict_chat_member(msg.chat.id, msg.from_user.id, permissions=ChatPermissions(can_send_messages=False))
             await db.execute("UPDATE users SET banned=TRUE, ban_until=NULL WHERE user_id=$1", msg.from_user.id)
