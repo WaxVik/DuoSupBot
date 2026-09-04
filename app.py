@@ -18,7 +18,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 # ========================== НАСТРОЙКИ ==========================
 BOT_TOKEN = "8970388836:AAEc_r1mZoswY_nKWTQOxcQbg3vXR4ehD8M"  # новый токен
 CREATOR_ID = 7675985792
-DATABASE_URL = "postgresql://postgres:kPDbfTTuTEvoTeOcitibgddkpMAKWUKH@postgres.railway.internal:5432/railway"
+DATABASE_URL = "postgresql://postgres:RsGrWajXqIorzUjiGwAJQiXoOqWzEYcx@postgres.railway.internal:5432/railway"  # НОВЫЙ!
 
 TOPICS = {
     "mod_chat": 6,
@@ -37,7 +37,6 @@ TOPICS = {
 }
 IGNORED_TOPICS = [TOPICS["admin"], TOPICS["appeals_hublox"]]
 
-# ========================== БАЗА ДАННЫХ ==========================
 db = None
 
 async def init_db():
@@ -67,7 +66,6 @@ async def init_db():
     for key in ['link_code', 'hublox_id', 'hubsup_id']:
         await db.execute("INSERT INTO config (key, value) VALUES ($1, $2) ON CONFLICT (key) DO NOTHING", key, '')
 
-# ========================== ФУНКЦИИ ==========================
 async def get_config(key):
     row = await db.fetchrow("SELECT value FROM config WHERE key=$1", key)
     return row[0] if row else None
@@ -233,19 +231,15 @@ async def update_admin_list():
             sent = await bot.send_message(chat_id=int(cid), message_thread_id=topic, text=text, parse_mode="Markdown")
             await set_config(f"adminlist_msg_{chat_key}", str(sent.message_id))
 
-# ========================== FSM ==========================
 class AppealState(StatesGroup):
     waiting_text = State()
 
 class RuleState(StatesGroup):
     waiting_text = State()
 
-# ========================== БОТ ==========================
 storage = MemoryStorage()
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=storage)
-
-# ========================== ОБРАБОТЧИКИ ==========================
 
 @dp.message(Command("start"))
 async def start_cmd(msg: Message):
@@ -743,7 +737,6 @@ async def handle_links(msg: Message):
         await msg.delete()
         await msg.answer("Вы забанены и не можете писать.")
 
-# ========================== ЗАПУСК ==========================
 async def main():
     logging.basicConfig(level=logging.INFO)
     await init_db()
